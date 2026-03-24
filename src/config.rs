@@ -5,9 +5,9 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use askama::Template;
 use include_dir::{Dir, include_dir};
-use serde::Deserialize;
+use schemars::{JsonSchema, Schema, schema_for};
+use serde::{Deserialize, Serialize};
 
 const APP_CONFIG_DIR: &str = "agent-playground";
 const ROOT_CONFIG_FILE_NAME: &str = "config.toml";
@@ -59,11 +59,13 @@ impl AppConfig {
 
     fn load_from_paths(paths: ConfigPaths) -> Result<Self> {
         ensure_root_initialized(&paths)?;
-        let raw_config = load_root_config(&paths)?;
-        let agents = raw_config.agent;
-        let default_agent = raw_config.default_agent;
-        let saved_playgrounds_dir =
-            resolve_saved_playgrounds_dir(&paths.root_dir, raw_config.saved_playgrounds_dir);
+        let resolved_root_config = load_root_config(&paths)?;
+        let agents = resolved_root_config.agents;
+        let default_agent = resolved_root_config.default_agent;
+        let saved_playgrounds_dir = resolve_saved_playgrounds_dir(
+            &paths.root_dir,
+            resolved_root_config.saved_playgrounds_dir,
+        );
 
         if !agents.contains_key(&default_agent) {
             bail!("default agent '{default_agent}' is not defined in [agent]");
@@ -94,40 +96,85 @@ pub struct InitResult {
 pub struct PlaygroundDefinition {
     pub id: String,
     pub description: String,
+    pub load_env: bool,
     pub directory: PathBuf,
     pub config_file: PathBuf,
 }
 
-#[derive(Debug, Default, Deserialize)]
-struct RawRootConfig {
-    agent: BTreeMap<String, String>,
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+pub struct RootConfigFile {
+    #[serde(default)]
+    pub agent: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved_playgrounds_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PlaygroundConfigFile {
+    pub description: String,
+    #[serde(default)]
+    pub load_env: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedRootConfig {
+    agents: BTreeMap<String, String>,
     default_agent: String,
     saved_playgrounds_dir: PathBuf,
 }
 
-#[derive(Debug, Default, Deserialize)]
-struct RawRootConfigPatch {
-    #[serde(default)]
-    agent: BTreeMap<String, String>,
-    default_agent: Option<String>,
-    saved_playgrounds_dir: Option<PathBuf>,
+impl RootConfigFile {
+    pub fn json_schema() -> Schema {
+        schema_for!(Self)
+    }
+
+    fn defaults_for_paths(paths: &ConfigPaths) -> Self {
+        let mut agent = BTreeMap::new();
+        agent.insert("claude".to_string(), "claude".to_string());
+        agent.insert("opencode".to_string(), "opencode".to_string());
+
+        Self {
+            agent,
+            default_agent: Some("claude".to_string()),
+            saved_playgrounds_dir: Some(default_saved_playgrounds_dir(paths)),
+        }
+    }
+
+    fn resolve(self, paths: &ConfigPaths) -> Result<ResolvedRootConfig> {
+        let defaults = Self::defaults_for_paths(paths);
+        let mut agents = defaults.agent;
+        agents.extend(self.agent);
+
+        let default_agent = self
+            .default_agent
+            .or(defaults.default_agent)
+            .context("default root config is missing default_agent")?;
+        let saved_playgrounds_dir = self
+            .saved_playgrounds_dir
+            .or(defaults.saved_playgrounds_dir)
+            .context("default root config is missing saved_playgrounds_dir")?;
+
+        Ok(ResolvedRootConfig {
+            agents,
+            default_agent,
+            saved_playgrounds_dir,
+        })
+    }
 }
 
-#[derive(Debug, Deserialize)]
-struct RawPlaygroundConfig {
-    description: String,
-}
+impl PlaygroundConfigFile {
+    pub fn json_schema() -> Schema {
+        schema_for!(Self)
+    }
 
-#[derive(Template)]
-#[template(path = "config/root_config.toml", escape = "none")]
-struct RootConfigTemplate<'a> {
-    saved_playgrounds_dir: &'a str,
-}
-
-#[derive(Template)]
-#[template(path = "config/playground_config.toml", escape = "none")]
-struct PlaygroundConfigTemplate<'a> {
-    playground_id: &'a str,
+    fn for_playground(playground_id: &str) -> Self {
+        Self {
+            description: format!("TODO: describe {playground_id}"),
+            load_env: false,
+        }
+    }
 }
 
 pub fn init_playground(playground_id: &str, agent_ids: &[String]) -> Result<InitResult> {
@@ -159,11 +206,10 @@ fn init_playground_at(
 
     fs::create_dir_all(&playground_dir)
         .with_context(|| format!("failed to create {}", playground_dir.display()))?;
-    let content = PlaygroundConfigTemplate { playground_id }
-        .render()
-        .context("failed to render playground config template")?;
-    fs::write(&playground_config_file, content)
-        .with_context(|| format!("failed to write {}", playground_config_file.display()))?;
+    write_toml_file(
+        &playground_config_file,
+        &PlaygroundConfigFile::for_playground(playground_id),
+    )?;
     copy_agent_templates(&playground_dir, &selected_agent_templates)?;
 
     Ok(InitResult {
@@ -282,46 +328,16 @@ fn ensure_root_initialized(paths: &ConfigPaths) -> Result<bool> {
         return Ok(false);
     }
 
-    let saved_playgrounds_dir = default_saved_playgrounds_dir(paths);
-    let saved_playgrounds_dir = saved_playgrounds_dir.to_string_lossy();
-    let content = RootConfigTemplate {
-        saved_playgrounds_dir: saved_playgrounds_dir.as_ref(),
-    }
-    .render()
-    .context("failed to render root config template")?;
-    fs::write(&paths.config_file, content)
-        .with_context(|| format!("failed to write {}", paths.config_file.display()))?;
+    write_toml_file(
+        &paths.config_file,
+        &RootConfigFile::defaults_for_paths(paths),
+    )?;
 
     Ok(true)
 }
 
-fn load_root_config(paths: &ConfigPaths) -> Result<RawRootConfig> {
-    let mut config = default_root_config(paths)?;
-
-    let patch: RawRootConfigPatch = read_toml_file(&paths.config_file)?;
-    config.agent.extend(patch.agent);
-
-    if let Some(default_agent) = patch.default_agent {
-        config.default_agent = default_agent;
-    }
-
-    if let Some(saved_playgrounds_dir) = patch.saved_playgrounds_dir {
-        config.saved_playgrounds_dir = saved_playgrounds_dir;
-    }
-
-    Ok(config)
-}
-
-fn default_root_config(paths: &ConfigPaths) -> Result<RawRootConfig> {
-    let saved_playgrounds_dir = default_saved_playgrounds_dir(paths);
-    let saved_playgrounds_dir = saved_playgrounds_dir.to_string_lossy();
-    let content = RootConfigTemplate {
-        saved_playgrounds_dir: saved_playgrounds_dir.as_ref(),
-    }
-    .render()
-    .context("failed to render root config template")?;
-
-    toml::from_str(&content).context("failed to parse bundled root config template")
+fn load_root_config(paths: &ConfigPaths) -> Result<ResolvedRootConfig> {
+    read_toml_file::<RootConfigFile>(&paths.config_file)?.resolve(paths)
 }
 
 fn default_saved_playgrounds_dir(paths: &ConfigPaths) -> PathBuf {
@@ -378,14 +394,15 @@ fn load_playgrounds(playgrounds_dir: &Path) -> Result<BTreeMap<String, Playgroun
             );
         }
 
-        let raw_config: RawPlaygroundConfig = read_toml_file(&config_file)?;
+        let playground_config: PlaygroundConfigFile = read_toml_file(&config_file)?;
         let id = entry.file_name().to_string_lossy().into_owned();
 
         playgrounds.insert(
             id.clone(),
             PlaygroundDefinition {
                 id,
-                description: raw_config.description,
+                description: playground_config.description,
+                load_env: playground_config.load_env,
                 directory,
                 config_file,
             },
@@ -406,14 +423,27 @@ where
         .with_context(|| format!("failed to parse TOML from {}", path.display()))
 }
 
+fn write_toml_file<T>(path: &Path, value: &T) -> Result<()>
+where
+    T: Serialize,
+{
+    let content =
+        toml::to_string_pretty(value).context("failed to serialize configuration to TOML")?;
+    fs::write(path, content).with_context(|| format!("failed to write {}", path.display()))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{APP_CONFIG_DIR, AppConfig, ConfigPaths, init_playground_at, user_config_base_dir};
+    use super::{
+        APP_CONFIG_DIR, AppConfig, ConfigPaths, PlaygroundConfigFile, RootConfigFile,
+        init_playground_at, read_toml_file, user_config_base_dir,
+    };
+    use serde_json::Value;
     use std::fs;
     use tempfile::TempDir;
 
     #[test]
-    fn init_creates_root_and_playground_configs_from_templates() {
+    fn init_creates_root_and_playground_configs_from_file_models() {
         let temp_dir = TempDir::new().expect("temp dir");
         let paths = ConfigPaths::from_root_dir(temp_dir.path().to_path_buf());
 
@@ -439,6 +469,22 @@ mod tests {
                 .join(".claude")
                 .exists()
         );
+        assert_eq!(
+            read_toml_file::<RootConfigFile>(&temp_dir.path().join("config.toml"))
+                .expect("root config"),
+            RootConfigFile::defaults_for_paths(&paths)
+        );
+        assert_eq!(
+            read_toml_file::<PlaygroundConfigFile>(
+                &temp_dir
+                    .path()
+                    .join("playgrounds")
+                    .join("demo")
+                    .join("apg.toml")
+            )
+            .expect("playground config"),
+            PlaygroundConfigFile::for_playground("demo")
+        );
 
         let config = AppConfig::load_from_paths(paths).expect("config should load");
         assert_eq!(config.agents.get("claude"), Some(&"claude".to_string()));
@@ -455,6 +501,13 @@ mod tests {
                 .expect("demo playground")
                 .description,
             "TODO: describe demo"
+        );
+        assert!(
+            !config
+                .playgrounds
+                .get("demo")
+                .expect("demo playground")
+                .load_env
         );
     }
 
@@ -478,7 +531,8 @@ codex = "codex --fast"
         fs::create_dir_all(&playground_dir).expect("create playground dir");
         fs::write(
             playground_dir.join("apg.toml"),
-            r#"description = "Demo playground""#,
+            r#"description = "Demo playground"
+load_env = true"#,
         )
         .expect("write playground config");
 
@@ -499,6 +553,7 @@ codex = "codex --fast"
 
         let playground = config.playgrounds.get("demo").expect("demo playground");
         assert_eq!(playground.description, "Demo playground");
+        assert!(playground.load_env);
         assert_eq!(playground.directory, playground_dir);
     }
 
@@ -723,5 +778,29 @@ claude = "claude"
 
         assert!(base_dir.ends_with(".config"));
         assert_eq!(paths.root_dir, base_dir.join(APP_CONFIG_DIR));
+    }
+
+    #[test]
+    fn root_config_schema_matches_file_shape() {
+        let schema = serde_json::to_value(RootConfigFile::json_schema()).expect("schema json");
+
+        assert_eq!(schema["type"], Value::String("object".to_string()));
+        assert!(schema["properties"]["agent"].is_object());
+        assert!(schema["properties"]["default_agent"].is_object());
+        assert!(schema["properties"]["saved_playgrounds_dir"].is_object());
+    }
+
+    #[test]
+    fn playground_config_schema_matches_file_shape() {
+        let schema =
+            serde_json::to_value(PlaygroundConfigFile::json_schema()).expect("schema json");
+
+        assert_eq!(schema["type"], Value::String("object".to_string()));
+        assert!(schema["properties"]["description"].is_object());
+        assert!(schema["properties"]["load_env"].is_object());
+        assert_eq!(
+            schema["required"],
+            Value::Array(vec![Value::String("description".to_string())])
+        );
     }
 }

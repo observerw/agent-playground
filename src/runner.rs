@@ -6,9 +6,12 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+use dotenvy::Error as DotenvError;
 use tempfile::tempdir;
 
 use crate::config::{AppConfig, PlaygroundDefinition};
+
+const DOTENV_FILE_NAME: &str = ".env";
 
 pub fn run_playground(
     config: &AppConfig,
@@ -28,8 +31,10 @@ pub fn run_playground(
 
     let temp_dir = tempdir().context("failed to create temporary playground directory")?;
     copy_playground_contents(playground, temp_dir.path())?;
+    let playground_env = load_playground_env(playground)?;
 
     let status = build_agent_command(agent_command)
+        .envs(playground_env)
         .current_dir(temp_dir.path())
         .status()
         .with_context(|| format!("failed to start agent '{agent_id}'"))?;
@@ -97,7 +102,7 @@ fn copy_playground_contents(playground: &PlaygroundDefinition, destination: &Pat
         })?;
         let source_path = entry.path();
 
-        if source_path == playground.config_file {
+        if should_skip_playground_path(playground, &source_path) {
             continue;
         }
 
@@ -105,6 +110,31 @@ fn copy_playground_contents(playground: &PlaygroundDefinition, destination: &Pat
     }
 
     Ok(())
+}
+
+fn should_skip_playground_path(playground: &PlaygroundDefinition, source_path: &Path) -> bool {
+    source_path == playground.config_file
+        || (playground.load_env
+            && source_path
+                .file_name()
+                .is_some_and(|name| name == DOTENV_FILE_NAME))
+}
+
+fn load_playground_env(playground: &PlaygroundDefinition) -> Result<Vec<(String, String)>> {
+    if !playground.load_env {
+        return Ok(Vec::new());
+    }
+
+    let env_path = playground.directory.join(DOTENV_FILE_NAME);
+    match dotenvy::from_path_iter(&env_path) {
+        Ok(entries) => entries
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .with_context(|| format!("failed to parse {}", env_path.display())),
+        Err(DotenvError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(Vec::new())
+        }
+        Err(error) => Err(error).with_context(|| format!("failed to load {}", env_path.display())),
+    }
 }
 
 fn copy_directory_contents(source: &Path, destination: &Path) -> Result<()> {
@@ -228,6 +258,18 @@ mod tests {
         "echo failed>agent.txt & exit /b 7".to_string()
     }
 
+    #[cfg(unix)]
+    fn command_recording_env(var_name: &str) -> String {
+        format!("printf '%s' \"${var_name}\" > env.txt && test ! -e .env && test ! -e apg.toml")
+    }
+
+    #[cfg(windows)]
+    fn command_recording_env(var_name: &str) -> String {
+        format!(
+            "echo %{var_name}%>env.txt && if exist .env exit /b 1 && if exist apg.toml exit /b 1"
+        )
+    }
+
     fn single_saved_snapshot(save_root: &Path) -> Result<std::path::PathBuf> {
         let snapshots = fs::read_dir(save_root)?
             .collect::<std::result::Result<Vec<_>, _>>()?
@@ -247,6 +289,7 @@ mod tests {
         Ok(PlaygroundDefinition {
             id: playground_id.to_string(),
             description: "demo".to_string(),
+            load_env: false,
             directory: source_dir.to_path_buf(),
             config_file,
         })
@@ -293,6 +336,7 @@ mod tests {
         let playground = PlaygroundDefinition {
             id: "demo".to_string(),
             description: "demo".to_string(),
+            load_env: false,
             directory: source_dir.path().to_path_buf(),
             config_file: config_file.clone(),
         };
@@ -307,6 +351,36 @@ mod tests {
         assert_eq!(
             fs::read_to_string(destination_dir.path().join("nested").join("task.md"))?,
             "nested"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn skips_dotenv_file_when_load_env_is_enabled() -> Result<()> {
+        let source_dir = tempdir()?;
+        let destination_dir = tempdir()?;
+        let config_file = source_dir.path().join("apg.toml");
+        let env_file = source_dir.path().join(".env");
+
+        fs::write(&config_file, "description = 'ignored'")?;
+        fs::write(source_dir.path().join("notes.txt"), "hello")?;
+        fs::write(&env_file, "API_TOKEN=secret\n")?;
+
+        let playground = PlaygroundDefinition {
+            id: "demo".to_string(),
+            description: "demo".to_string(),
+            load_env: true,
+            directory: source_dir.path().to_path_buf(),
+            config_file,
+        };
+
+        copy_playground_contents(&playground, destination_dir.path())?;
+
+        assert!(!destination_dir.path().join(".env").exists());
+        assert_eq!(
+            fs::read_to_string(destination_dir.path().join("notes.txt"))?,
+            "hello"
         );
 
         Ok(())
@@ -493,6 +567,36 @@ mod tests {
 
         assert_eq!(exit_code, 7);
         assert_eq!(fs::read_dir(save_root.path())?.count(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn loads_dotenv_into_agent_environment_without_copying_file() -> Result<()> {
+        let source_dir = tempdir()?;
+        let save_root = tempdir()?;
+        fs::write(
+            source_dir.path().join(".env"),
+            "PLAYGROUND_SECRET=token-123\n",
+        )?;
+        let mut config = make_config(
+            source_dir.path(),
+            save_root.path(),
+            "demo",
+            "claude",
+            &[("claude", command_recording_env("PLAYGROUND_SECRET"))],
+        )?;
+        config
+            .playgrounds
+            .get_mut("demo")
+            .expect("demo playground")
+            .load_env = true;
+
+        let exit_code = run_playground(&config, "demo", None, true)?;
+        let snapshot = single_saved_snapshot(save_root.path())?;
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(fs::read_to_string(snapshot.join("env.txt"))?, "token-123");
+        assert!(!snapshot.join(".env").exists());
         Ok(())
     }
 }
