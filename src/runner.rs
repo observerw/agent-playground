@@ -1,5 +1,6 @@
 use std::{
     fs,
+    io::{self, BufRead, IsTerminal, Write},
     path::{Path, PathBuf},
     process::{self, Command as ProcessCommand},
     time::{SystemTime, UNIX_EPOCH},
@@ -41,7 +42,14 @@ pub fn run_playground(
 
     let (exit_code, exited_normally) = exit_code_from_status(status)?;
 
-    if should_save_playground_snapshot(exited_normally, save_on_exit) {
+    let should_save = should_save_playground_snapshot(exited_normally, save_on_exit)
+        || (should_prompt_to_save_playground_snapshot(
+            exited_normally,
+            save_on_exit,
+            is_interactive_terminal(),
+        ) && prompt_to_save_playground_snapshot(io::stdin().lock(), &mut io::stdout().lock())?);
+
+    if should_save {
         let saved_path = save_playground_snapshot(
             temp_dir.path(),
             &config.saved_playgrounds_dir,
@@ -55,6 +63,35 @@ pub fn run_playground(
 
 fn should_save_playground_snapshot(exited_normally: bool, save_on_exit: bool) -> bool {
     exited_normally && save_on_exit
+}
+
+fn should_prompt_to_save_playground_snapshot(
+    exited_normally: bool,
+    save_on_exit: bool,
+    is_interactive: bool,
+) -> bool {
+    exited_normally && !save_on_exit && is_interactive
+}
+
+fn is_interactive_terminal() -> bool {
+    io::stdin().is_terminal() && io::stdout().is_terminal()
+}
+
+fn prompt_to_save_playground_snapshot<R: BufRead, W: Write>(
+    mut input: R,
+    output: &mut W,
+) -> Result<bool> {
+    write!(output, "Keep temporary playground copy? [y/N] ")
+        .context("failed to write save prompt")?;
+    output.flush().context("failed to flush save prompt")?;
+
+    let mut response = String::new();
+    input
+        .read_line(&mut response)
+        .context("failed to read save prompt response")?;
+
+    let normalized = response.trim().to_ascii_lowercase();
+    Ok(matches!(normalized.as_str(), "y" | "yes"))
 }
 
 fn save_playground_snapshot(
@@ -245,7 +282,8 @@ mod tests {
     use crate::config::{AppConfig, ConfigPaths, PlaygroundDefinition};
 
     use super::{
-        copy_playground_contents, exit_code_from_status, run_playground, save_playground_snapshot,
+        copy_playground_contents, exit_code_from_status, prompt_to_save_playground_snapshot,
+        run_playground, save_playground_snapshot, should_prompt_to_save_playground_snapshot,
         should_save_playground_snapshot,
     };
 
@@ -401,6 +439,37 @@ mod tests {
         assert!(!should_save_playground_snapshot(true, false));
         assert!(!should_save_playground_snapshot(false, true));
         assert!(!should_save_playground_snapshot(false, false));
+    }
+
+    #[test]
+    fn prompts_only_for_normal_exit_without_explicit_save_flag() {
+        assert!(should_prompt_to_save_playground_snapshot(true, false, true));
+        assert!(!should_prompt_to_save_playground_snapshot(true, true, true));
+        assert!(!should_prompt_to_save_playground_snapshot(
+            false, false, true
+        ));
+        assert!(!should_prompt_to_save_playground_snapshot(
+            true, false, false
+        ));
+    }
+
+    #[test]
+    fn prompt_accepts_yes_and_rejects_default_enter() -> Result<()> {
+        let mut output = Vec::new();
+        let should_save =
+            prompt_to_save_playground_snapshot(std::io::Cursor::new("y\n"), &mut output)?;
+        assert!(should_save);
+        assert_eq!(
+            String::from_utf8(output).expect("prompt output"),
+            "Keep temporary playground copy? [y/N] "
+        );
+
+        let mut output = Vec::new();
+        let should_save =
+            prompt_to_save_playground_snapshot(std::io::Cursor::new("\n"), &mut output)?;
+        assert!(!should_save);
+
+        Ok(())
     }
 
     #[test]
