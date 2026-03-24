@@ -25,6 +25,7 @@
 ```
 
 `agent-playground` is a simple CLI for running agent in a temporary playground.
+It is currently supported on macOS and Linux.
 
 ## Motivation
 
@@ -41,6 +42,8 @@ Sometimes we only want to use them for a quick operation, such as calling a remo
 ```bash
 cargo install agent-playground
 ```
+
+`cargo install` on Windows is not supported.
 
 ### With installer script
 
