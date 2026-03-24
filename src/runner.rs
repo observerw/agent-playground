@@ -196,17 +196,85 @@ fn exit_code_from_status(status: process::ExitStatus) -> Result<(i32, bool)> {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{collections::BTreeMap, fs, path::Path};
 
     use anyhow::Result;
     use tempfile::tempdir;
 
-    use crate::config::PlaygroundDefinition;
+    use crate::config::{AppConfig, ConfigPaths, PlaygroundDefinition};
 
     use super::{
-        copy_playground_contents, exit_code_from_status, save_playground_snapshot,
+        copy_playground_contents, exit_code_from_status, run_playground, save_playground_snapshot,
         should_save_playground_snapshot,
     };
+
+    #[cfg(unix)]
+    fn command_writing_marker(marker: &str) -> String {
+        format!("printf '{marker}' > agent.txt && test ! -e apg.toml")
+    }
+
+    #[cfg(windows)]
+    fn command_writing_marker(marker: &str) -> String {
+        format!("echo {marker}>agent.txt && if exist apg.toml exit /b 1")
+    }
+
+    #[cfg(unix)]
+    fn failing_command() -> String {
+        "printf 'failed' > agent.txt; exit 7".to_string()
+    }
+
+    #[cfg(windows)]
+    fn failing_command() -> String {
+        "echo failed>agent.txt & exit /b 7".to_string()
+    }
+
+    fn single_saved_snapshot(save_root: &Path) -> Result<std::path::PathBuf> {
+        let snapshots = fs::read_dir(save_root)?
+            .collect::<std::result::Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(|entry| entry.path())
+            .collect::<Vec<_>>();
+
+        assert_eq!(snapshots.len(), 1);
+        Ok(snapshots.into_iter().next().expect("single snapshot"))
+    }
+
+    fn make_playground(source_dir: &Path, playground_id: &str) -> Result<PlaygroundDefinition> {
+        let config_file = source_dir.join("apg.toml");
+        fs::write(&config_file, "description = 'ignored'")?;
+        fs::write(source_dir.join("notes.txt"), "hello")?;
+
+        Ok(PlaygroundDefinition {
+            id: playground_id.to_string(),
+            description: "demo".to_string(),
+            directory: source_dir.to_path_buf(),
+            config_file,
+        })
+    }
+
+    fn make_config(
+        source_dir: &Path,
+        save_root: &Path,
+        playground_id: &str,
+        default_agent: &str,
+        agents: &[(&str, String)],
+    ) -> Result<AppConfig> {
+        let playground = make_playground(source_dir, playground_id)?;
+        let agents = agents
+            .iter()
+            .map(|(id, command)| ((*id).to_string(), command.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let mut playgrounds = BTreeMap::new();
+        playgrounds.insert(playground_id.to_string(), playground);
+
+        Ok(AppConfig {
+            paths: ConfigPaths::from_root_dir(source_dir.join("config-root")),
+            agents,
+            default_agent: default_agent.to_string(),
+            saved_playgrounds_dir: save_root.to_path_buf(),
+            playgrounds,
+        })
+    }
 
     #[test]
     fn copies_playground_contents_except_config_file() -> Result<()> {
@@ -298,6 +366,133 @@ mod tests {
             assert_eq!(exit_code_from_status(interrupted)?, (130, false));
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn errors_for_unknown_playground() -> Result<()> {
+        let source_dir = tempdir()?;
+        let save_root = tempdir()?;
+        let config = make_config(
+            source_dir.path(),
+            save_root.path(),
+            "demo",
+            "claude",
+            &[("claude", command_writing_marker("default"))],
+        )?;
+
+        let error =
+            run_playground(&config, "missing", None, false).expect_err("unknown playground");
+
+        assert!(error.to_string().contains("unknown playground 'missing'"));
+        Ok(())
+    }
+
+    #[test]
+    fn errors_for_unknown_agent() -> Result<()> {
+        let source_dir = tempdir()?;
+        let save_root = tempdir()?;
+        let config = make_config(
+            source_dir.path(),
+            save_root.path(),
+            "demo",
+            "claude",
+            &[("claude", command_writing_marker("default"))],
+        )?;
+
+        let error =
+            run_playground(&config, "demo", Some("missing"), false).expect_err("unknown agent");
+
+        assert!(error.to_string().contains("unknown agent 'missing'"));
+        Ok(())
+    }
+
+    #[test]
+    fn uses_default_agent_and_saves_snapshot_when_enabled() -> Result<()> {
+        let source_dir = tempdir()?;
+        let save_root = tempdir()?;
+        let config = make_config(
+            source_dir.path(),
+            save_root.path(),
+            "demo",
+            "claude",
+            &[("claude", command_writing_marker("default"))],
+        )?;
+
+        let exit_code = run_playground(&config, "demo", None, true)?;
+        let snapshot = single_saved_snapshot(save_root.path())?;
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(
+            fs::read_to_string(snapshot.join("agent.txt"))?.trim(),
+            "default"
+        );
+        assert_eq!(fs::read_to_string(snapshot.join("notes.txt"))?, "hello");
+        assert!(!snapshot.join("apg.toml").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn selected_agent_overrides_default_agent() -> Result<()> {
+        let source_dir = tempdir()?;
+        let save_root = tempdir()?;
+        let config = make_config(
+            source_dir.path(),
+            save_root.path(),
+            "demo",
+            "claude",
+            &[
+                ("claude", command_writing_marker("default")),
+                ("codex", command_writing_marker("selected")),
+            ],
+        )?;
+
+        let exit_code = run_playground(&config, "demo", Some("codex"), true)?;
+        let snapshot = single_saved_snapshot(save_root.path())?;
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(
+            fs::read_to_string(snapshot.join("agent.txt"))?.trim(),
+            "selected"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn does_not_save_snapshot_when_disabled() -> Result<()> {
+        let source_dir = tempdir()?;
+        let save_root = tempdir()?;
+        let config = make_config(
+            source_dir.path(),
+            save_root.path(),
+            "demo",
+            "claude",
+            &[("claude", command_writing_marker("default"))],
+        )?;
+
+        let exit_code = run_playground(&config, "demo", None, false)?;
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(fs::read_dir(save_root.path())?.count(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn does_not_save_snapshot_when_agent_exits_with_error() -> Result<()> {
+        let source_dir = tempdir()?;
+        let save_root = tempdir()?;
+        let config = make_config(
+            source_dir.path(),
+            save_root.path(),
+            "demo",
+            "claude",
+            &[("claude", failing_command())],
+        )?;
+
+        let exit_code = run_playground(&config, "demo", None, true)?;
+
+        assert_eq!(exit_code, 7);
+        assert_eq!(fs::read_dir(save_root.path())?.count(), 0);
         Ok(())
     }
 }

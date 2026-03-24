@@ -138,4 +138,51 @@ mod tests {
 
         assert_eq!(matches.get_one::<bool>("save"), Some(&false));
     }
+
+    #[test]
+    fn init_subcommand_parses_playground_and_agents() {
+        let matches = build_cli()
+            .try_get_matches_from([
+                "apg", "init", "demo", "--agent", "claude", "--agent", "codex",
+            ])
+            .expect("cli should parse");
+
+        let Some(("init", init_matches)) = matches.subcommand() else {
+            panic!("init subcommand")
+        };
+        assert_eq!(
+            init_matches.get_one::<String>("playground_id"),
+            Some(&"demo".to_string())
+        );
+        assert_eq!(
+            init_matches
+                .get_many::<String>("agent_ids")
+                .expect("agent ids")
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec!["claude".to_string(), "codex".to_string()]
+        );
+    }
+
+    #[test]
+    fn list_subcommand_parses_without_run_arguments() {
+        let matches = build_cli()
+            .try_get_matches_from(["apg", "list"])
+            .expect("cli should parse");
+
+        assert!(matches.subcommand_matches("list").is_some());
+        assert!(matches.get_one::<String>("playground_id").is_none());
+    }
+
+    #[test]
+    fn root_command_requires_playground_or_subcommand() {
+        let error = build_cli()
+            .try_get_matches_from(["apg"])
+            .expect_err("cli should reject empty input");
+
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+        );
+    }
 }

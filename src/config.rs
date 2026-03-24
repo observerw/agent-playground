@@ -625,6 +625,25 @@ opencode = "opencode"
     }
 
     #[test]
+    fn init_deduplicates_selected_agent_templates() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let paths = ConfigPaths::from_root_dir(temp_dir.path().to_path_buf());
+        let selected_agents = vec![
+            "claude".to_string(),
+            "claude".to_string(),
+            "codex".to_string(),
+        ];
+
+        let result =
+            init_playground_at(paths, "demo", &selected_agents).expect("init should succeed");
+
+        assert_eq!(
+            result.initialized_agent_templates,
+            vec!["claude".to_string(), "codex".to_string()]
+        );
+    }
+
+    #[test]
     fn init_errors_for_unknown_agent_template_before_creating_playground() {
         let temp_dir = TempDir::new().expect("temp dir");
         let paths = ConfigPaths::from_root_dir(temp_dir.path().to_path_buf());
@@ -639,6 +658,62 @@ opencode = "opencode"
                 .contains("unknown agent template 'missing'")
         );
         assert!(!temp_dir.path().join("playgrounds").join("demo").exists());
+    }
+
+    #[test]
+    fn errors_when_root_config_toml_is_invalid() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        fs::write(temp_dir.path().join("config.toml"), "default_agent = ")
+            .expect("write invalid root config");
+
+        let error =
+            AppConfig::load_from_paths(ConfigPaths::from_root_dir(temp_dir.path().to_path_buf()))
+                .expect_err("invalid root config should fail");
+
+        assert!(error.to_string().contains("failed to parse TOML"));
+    }
+
+    #[test]
+    fn errors_when_playground_config_toml_is_invalid() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        fs::write(
+            temp_dir.path().join("config.toml"),
+            r#"[agent]
+claude = "claude"
+"#,
+        )
+        .expect("write root config");
+        let playground_dir = temp_dir.path().join("playgrounds").join("broken");
+        fs::create_dir_all(&playground_dir).expect("create playground dir");
+        fs::write(playground_dir.join("apg.toml"), "description = ")
+            .expect("write invalid playground config");
+
+        let error =
+            AppConfig::load_from_paths(ConfigPaths::from_root_dir(temp_dir.path().to_path_buf()))
+                .expect_err("invalid playground config should fail");
+
+        assert!(error.to_string().contains("failed to parse TOML"));
+    }
+
+    #[test]
+    fn ignores_non_directory_entries_in_playgrounds_dir() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        fs::write(
+            temp_dir.path().join("config.toml"),
+            r#"[agent]
+claude = "claude"
+"#,
+        )
+        .expect("write root config");
+        let playgrounds_dir = temp_dir.path().join("playgrounds");
+        fs::create_dir_all(&playgrounds_dir).expect("create playgrounds dir");
+        fs::write(playgrounds_dir.join("README.md"), "ignore me").expect("write file entry");
+
+        let config =
+            AppConfig::load_from_paths(ConfigPaths::from_root_dir(temp_dir.path().to_path_buf()))
+                .expect("config should load");
+
+        assert!(config.playgrounds.is_empty());
     }
 
     #[test]
