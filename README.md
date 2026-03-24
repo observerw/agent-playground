@@ -22,6 +22,19 @@ The installer supports:
 - `APG_VERSION=0.1.0` to pin a specific release
 - `APG_REPO=<owner>/<repo>` if you run the unpatched template directly
 
+## Release
+
+This repository is configured to publish to crates.io from GitHub Actions via trusted publishing.
+
+On crates.io, open `agent-playground` and go to `Settings -> Trusted Publishing`, then add this GitHub configuration:
+
+- Repository owner: `observerw`
+- Repository name: `agent-playground`
+- Workflow filename: `release.yml`
+- Environment: `release`
+
+The release workflow publishes when you push a tag like `v0.1.0`, and it uses `rust-lang/crates-io-auth-action@v1` to exchange the GitHub Actions OIDC token for a short-lived crates.io publish token.
+
 ## Usage
 
 Initialize a playground:

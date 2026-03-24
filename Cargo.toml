@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 description = "A minimal Rust playground runner for trying different coding agents in isolated workspace copies."
 readme = "README.md"
+license = "MIT"
+repository = "https://github.com/observerw/agent-playground"
 keywords = ["agent", "cli", "playground"]
 categories = ["command-line-utilities", "development-tools"]
 
