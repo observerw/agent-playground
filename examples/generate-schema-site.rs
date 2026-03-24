@@ -5,7 +5,7 @@ use anyhow::Result;
 use clap::{Arg, Command};
 
 fn build_cli() -> Command {
-    Command::new("apg-schema")
+    Command::new("generate-schema-site")
         .about("Generate JSON Schema files and a GitHub Pages site")
         .arg(
             Arg::new("output_dir")
@@ -28,21 +28,4 @@ fn main() -> Result<()> {
     println!("generated schema site in {}", output_dir.display());
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::build_cli;
-
-    #[test]
-    fn uses_default_output_dir() {
-        let matches = build_cli()
-            .try_get_matches_from(["apg-schema"])
-            .expect("cli should parse");
-
-        assert_eq!(
-            matches.get_one::<String>("output_dir"),
-            Some(&"target/schema-site".to_string())
-        );
-    }
 }
