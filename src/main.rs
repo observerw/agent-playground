@@ -6,7 +6,10 @@ use agent_playground::{
     runner::run_playground,
 };
 use anyhow::{Context, Result};
-use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand};
+use clap::{ArgAction, Args, Parser, Subcommand};
+
+#[cfg(test)]
+use clap::CommandFactory;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -62,6 +65,7 @@ struct InitArgs {
     agent_ids: Vec<String>,
 }
 
+#[cfg(test)]
 fn build_cli() -> clap::Command {
     Cli::command()
 }
