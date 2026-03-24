@@ -266,7 +266,7 @@ mod tests {
     #[cfg(windows)]
     fn command_recording_env(var_name: &str) -> String {
         format!(
-            "<nul set /p=%{var_name}%>env.txt && if exist .env exit /b 1 && if exist apg.toml exit /b 1"
+            "powershell -NoProfile -Command \"[System.IO.File]::WriteAllText('env.txt', $env:{var_name})\" && if exist .env exit /b 1 && if exist apg.toml exit /b 1"
         )
     }
 
