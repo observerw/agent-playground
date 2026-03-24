@@ -58,7 +58,6 @@ mod tests {
             PlaygroundDefinition {
                 id: "demo".to_string(),
                 description: "Demo playground".to_string(),
-                load_env: false,
                 directory: PathBuf::from("/tmp/demo"),
                 config_file: PathBuf::from("/tmp/demo/apg.toml"),
             },
@@ -68,7 +67,6 @@ mod tests {
             PlaygroundDefinition {
                 id: "longer-id".to_string(),
                 description: "Longer playground".to_string(),
-                load_env: false,
                 directory: PathBuf::from("/tmp/longer-id"),
                 config_file: PathBuf::from("/tmp/longer-id/apg.toml"),
             },

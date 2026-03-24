@@ -30,8 +30,8 @@ pub fn run_playground(
         .with_context(|| format!("unknown agent '{agent_id}'"))?;
 
     let temp_dir = tempdir().context("failed to create temporary playground directory")?;
-    copy_playground_contents(playground, temp_dir.path())?;
-    let playground_env = load_playground_env(playground)?;
+    copy_playground_contents(playground, config.load_env, temp_dir.path())?;
+    let playground_env = load_playground_env(playground, config.load_env)?;
 
     let status = build_agent_command(agent_command)
         .envs(playground_env)
@@ -90,7 +90,11 @@ fn next_saved_playground_dir(saved_playgrounds_dir: &Path, playground_id: &str) 
     candidate
 }
 
-fn copy_playground_contents(playground: &PlaygroundDefinition, destination: &Path) -> Result<()> {
+fn copy_playground_contents(
+    playground: &PlaygroundDefinition,
+    load_env: bool,
+    destination: &Path,
+) -> Result<()> {
     for entry in fs::read_dir(&playground.directory)
         .with_context(|| format!("failed to read {}", playground.directory.display()))?
     {
@@ -102,7 +106,7 @@ fn copy_playground_contents(playground: &PlaygroundDefinition, destination: &Pat
         })?;
         let source_path = entry.path();
 
-        if should_skip_playground_path(playground, &source_path) {
+        if should_skip_playground_path(playground, load_env, &source_path) {
             continue;
         }
 
@@ -112,16 +116,23 @@ fn copy_playground_contents(playground: &PlaygroundDefinition, destination: &Pat
     Ok(())
 }
 
-fn should_skip_playground_path(playground: &PlaygroundDefinition, source_path: &Path) -> bool {
+fn should_skip_playground_path(
+    playground: &PlaygroundDefinition,
+    load_env: bool,
+    source_path: &Path,
+) -> bool {
     source_path == playground.config_file
-        || (playground.load_env
+        || (load_env
             && source_path
                 .file_name()
                 .is_some_and(|name| name == DOTENV_FILE_NAME))
 }
 
-fn load_playground_env(playground: &PlaygroundDefinition) -> Result<Vec<(String, String)>> {
-    if !playground.load_env {
+fn load_playground_env(
+    playground: &PlaygroundDefinition,
+    load_env: bool,
+) -> Result<Vec<(String, String)>> {
+    if !load_env {
         return Ok(Vec::new());
     }
 
@@ -289,7 +300,6 @@ mod tests {
         Ok(PlaygroundDefinition {
             id: playground_id.to_string(),
             description: "demo".to_string(),
-            load_env: false,
             directory: source_dir.to_path_buf(),
             config_file,
         })
@@ -314,6 +324,7 @@ mod tests {
             paths: ConfigPaths::from_root_dir(source_dir.join("config-root")),
             agents,
             default_agent: default_agent.to_string(),
+            load_env: false,
             saved_playgrounds_dir: save_root.to_path_buf(),
             playgrounds,
         })
@@ -336,12 +347,11 @@ mod tests {
         let playground = PlaygroundDefinition {
             id: "demo".to_string(),
             description: "demo".to_string(),
-            load_env: false,
             directory: source_dir.path().to_path_buf(),
             config_file: config_file.clone(),
         };
 
-        copy_playground_contents(&playground, destination_dir.path())?;
+        copy_playground_contents(&playground, false, destination_dir.path())?;
 
         assert!(!destination_dir.path().join("apg.toml").exists());
         assert_eq!(
@@ -370,12 +380,11 @@ mod tests {
         let playground = PlaygroundDefinition {
             id: "demo".to_string(),
             description: "demo".to_string(),
-            load_env: true,
             directory: source_dir.path().to_path_buf(),
             config_file,
         };
 
-        copy_playground_contents(&playground, destination_dir.path())?;
+        copy_playground_contents(&playground, true, destination_dir.path())?;
 
         assert!(!destination_dir.path().join(".env").exists());
         assert_eq!(
@@ -585,11 +594,7 @@ mod tests {
             "claude",
             &[("claude", command_recording_env("PLAYGROUND_SECRET"))],
         )?;
-        config
-            .playgrounds
-            .get_mut("demo")
-            .expect("demo playground")
-            .load_env = true;
+        config.load_env = true;
 
         let exit_code = run_playground(&config, "demo", None, true)?;
         let snapshot = single_saved_snapshot(save_root.path())?;
