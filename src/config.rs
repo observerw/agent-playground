@@ -48,6 +48,7 @@ pub struct AppConfig {
     pub paths: ConfigPaths,
     pub agents: BTreeMap<String, String>,
     pub default_agent: String,
+    pub load_env: bool,
     pub saved_playgrounds_dir: PathBuf,
     pub playgrounds: BTreeMap<String, PlaygroundDefinition>,
 }
@@ -62,6 +63,7 @@ impl AppConfig {
         let resolved_root_config = load_root_config(&paths)?;
         let agents = resolved_root_config.agents;
         let default_agent = resolved_root_config.default_agent;
+        let load_env = resolved_root_config.load_env;
         let saved_playgrounds_dir = resolve_saved_playgrounds_dir(
             &paths.root_dir,
             resolved_root_config.saved_playgrounds_dir,
@@ -77,6 +79,7 @@ impl AppConfig {
             paths,
             agents,
             default_agent,
+            load_env,
             saved_playgrounds_dir,
             playgrounds,
         })
@@ -96,7 +99,6 @@ pub struct InitResult {
 pub struct PlaygroundDefinition {
     pub id: String,
     pub description: String,
-    pub load_env: bool,
     pub directory: PathBuf,
     pub config_file: PathBuf,
 }
@@ -108,20 +110,21 @@ pub struct RootConfigFile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_agent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load_env: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub saved_playgrounds_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct PlaygroundConfigFile {
     pub description: String,
-    #[serde(default)]
-    pub load_env: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ResolvedRootConfig {
     agents: BTreeMap<String, String>,
     default_agent: String,
+    load_env: bool,
     saved_playgrounds_dir: PathBuf,
 }
 
@@ -138,6 +141,7 @@ impl RootConfigFile {
         Self {
             agent,
             default_agent: Some("claude".to_string()),
+            load_env: Some(false),
             saved_playgrounds_dir: Some(default_saved_playgrounds_dir(paths)),
         }
     }
@@ -151,6 +155,10 @@ impl RootConfigFile {
             .default_agent
             .or(defaults.default_agent)
             .context("default root config is missing default_agent")?;
+        let load_env = self
+            .load_env
+            .or(defaults.load_env)
+            .context("default root config is missing load_env")?;
         let saved_playgrounds_dir = self
             .saved_playgrounds_dir
             .or(defaults.saved_playgrounds_dir)
@@ -159,6 +167,7 @@ impl RootConfigFile {
         Ok(ResolvedRootConfig {
             agents,
             default_agent,
+            load_env,
             saved_playgrounds_dir,
         })
     }
@@ -172,7 +181,6 @@ impl PlaygroundConfigFile {
     fn for_playground(playground_id: &str) -> Self {
         Self {
             description: format!("TODO: describe {playground_id}"),
-            load_env: false,
         }
     }
 }
@@ -402,7 +410,6 @@ fn load_playgrounds(playgrounds_dir: &Path) -> Result<BTreeMap<String, Playgroun
             PlaygroundDefinition {
                 id,
                 description: playground_config.description,
-                load_env: playground_config.load_env,
                 directory,
                 config_file,
             },
@@ -490,6 +497,7 @@ mod tests {
         assert_eq!(config.agents.get("claude"), Some(&"claude".to_string()));
         assert_eq!(config.agents.get("opencode"), Some(&"opencode".to_string()));
         assert_eq!(config.default_agent, "claude");
+        assert!(!config.load_env);
         assert_eq!(
             config.saved_playgrounds_dir,
             temp_dir.path().join("saved-playgrounds")
@@ -502,13 +510,6 @@ mod tests {
                 .description,
             "TODO: describe demo"
         );
-        assert!(
-            !config
-                .playgrounds
-                .get("demo")
-                .expect("demo playground")
-                .load_env
-        );
     }
 
     #[test]
@@ -518,6 +519,7 @@ mod tests {
         fs::write(
             root.join("config.toml"),
             r#"default_agent = "codex"
+load_env = true
 saved_playgrounds_dir = "archives"
 
 [agent]
@@ -531,8 +533,7 @@ codex = "codex --fast"
         fs::create_dir_all(&playground_dir).expect("create playground dir");
         fs::write(
             playground_dir.join("apg.toml"),
-            r#"description = "Demo playground"
-load_env = true"#,
+            r#"description = "Demo playground""#,
         )
         .expect("write playground config");
 
@@ -549,11 +550,11 @@ load_env = true"#,
             Some(&"codex --fast".to_string())
         );
         assert_eq!(config.default_agent, "codex");
+        assert!(config.load_env);
         assert_eq!(config.saved_playgrounds_dir, root.join("archives"));
 
         let playground = config.playgrounds.get("demo").expect("demo playground");
         assert_eq!(playground.description, "Demo playground");
-        assert!(playground.load_env);
         assert_eq!(playground.directory, playground_dir);
     }
 
@@ -568,6 +569,7 @@ load_env = true"#,
         assert!(temp_dir.path().join("playgrounds").is_dir());
         assert_eq!(config.agents.get("claude"), Some(&"claude".to_string()));
         assert_eq!(config.default_agent, "claude");
+        assert!(!config.load_env);
         assert_eq!(
             config.saved_playgrounds_dir,
             temp_dir.path().join("saved-playgrounds")
@@ -791,6 +793,7 @@ claude = "claude"
         assert_eq!(schema["type"], Value::String("object".to_string()));
         assert!(schema["properties"]["agent"].is_object());
         assert!(schema["properties"]["default_agent"].is_object());
+        assert!(schema["properties"]["load_env"].is_object());
         assert!(schema["properties"]["saved_playgrounds_dir"].is_object());
     }
 
@@ -801,7 +804,6 @@ claude = "claude"
 
         assert_eq!(schema["type"], Value::String("object".to_string()));
         assert!(schema["properties"]["description"].is_object());
-        assert!(schema["properties"]["load_env"].is_object());
         assert_eq!(
             schema["required"],
             Value::Array(vec![Value::String("description".to_string())])
