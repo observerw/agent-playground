@@ -1,6 +1,5 @@
 use std::{
     fs,
-    io::{self, Write},
     path::{Path, PathBuf},
     process::{self, Command as ProcessCommand},
     time::{SystemTime, UNIX_EPOCH},
@@ -15,6 +14,7 @@ pub fn run_playground(
     config: &AppConfig,
     playground_id: &str,
     selected_agent_id: Option<&str>,
+    save_on_exit: bool,
 ) -> Result<i32> {
     let playground = config
         .playgrounds
@@ -36,36 +36,20 @@ pub fn run_playground(
 
     let (exit_code, exited_normally) = exit_code_from_status(status)?;
 
-    if exited_normally
-        && prompt_to_save_playground(playground_id, &config.saved_playgrounds_dir)?
-    {
-        let saved_path =
-            save_playground_snapshot(temp_dir.path(), &config.saved_playgrounds_dir, playground_id)?;
+    if should_save_playground_snapshot(exited_normally, save_on_exit) {
+        let saved_path = save_playground_snapshot(
+            temp_dir.path(),
+            &config.saved_playgrounds_dir,
+            playground_id,
+        )?;
         println!("saved playground snapshot to {}", saved_path.display());
     }
 
     Ok(exit_code)
 }
 
-fn prompt_to_save_playground(playground_id: &str, saved_playgrounds_dir: &Path) -> Result<bool> {
-    print!(
-        "agent exited normally. save temporary playground '{playground_id}' to {}? [y/N]: ",
-        saved_playgrounds_dir.display()
-    );
-    io::stdout()
-        .flush()
-        .context("failed to flush save prompt to stdout")?;
-
-    let mut input = String::new();
-    io::stdin()
-        .read_line(&mut input)
-        .context("failed to read save confirmation from stdin")?;
-
-    Ok(parse_save_confirmation(&input))
-}
-
-fn parse_save_confirmation(input: &str) -> bool {
-    matches!(input.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+fn should_save_playground_snapshot(exited_normally: bool, save_on_exit: bool) -> bool {
+    exited_normally && save_on_exit
 }
 
 fn save_playground_snapshot(
@@ -127,8 +111,8 @@ fn copy_directory_contents(source: &Path, destination: &Path) -> Result<()> {
     for entry in
         fs::read_dir(source).with_context(|| format!("failed to read {}", source.display()))?
     {
-        let entry =
-            entry.with_context(|| format!("failed to inspect an entry under {}", source.display()))?;
+        let entry = entry
+            .with_context(|| format!("failed to inspect an entry under {}", source.display()))?;
         copy_path(&entry.path(), &destination.join(entry.file_name()))?;
     }
 
@@ -220,8 +204,8 @@ mod tests {
     use crate::config::PlaygroundDefinition;
 
     use super::{
-        copy_playground_contents, exit_code_from_status, parse_save_confirmation,
-        save_playground_snapshot,
+        copy_playground_contents, exit_code_from_status, save_playground_snapshot,
+        should_save_playground_snapshot,
     };
 
     #[test]
@@ -261,14 +245,11 @@ mod tests {
     }
 
     #[test]
-    fn parses_save_confirmation_with_default_no() {
-        assert!(parse_save_confirmation("y"));
-        assert!(parse_save_confirmation("Y\n"));
-        assert!(parse_save_confirmation("yes"));
-        assert!(!parse_save_confirmation(""));
-        assert!(!parse_save_confirmation("\n"));
-        assert!(!parse_save_confirmation("n"));
-        assert!(!parse_save_confirmation("anything else"));
+    fn saves_snapshot_only_for_normal_exit_when_enabled() {
+        assert!(should_save_playground_snapshot(true, true));
+        assert!(!should_save_playground_snapshot(true, false));
+        assert!(!should_save_playground_snapshot(false, true));
+        assert!(!should_save_playground_snapshot(false, false));
     }
 
     #[test]

@@ -6,6 +6,7 @@ use agent_playground::{
     runner::run_playground,
 };
 use anyhow::{Context, Result};
+use clap::builder::BoolishValueParser;
 use clap::{Arg, ArgAction, Command};
 
 fn build_cli() -> Command {
@@ -44,6 +45,17 @@ fn build_cli() -> Command {
                 .value_name("AGENT_ID")
                 .help("The agent identifier to use for this run")
                 .required(false),
+        )
+        .arg(
+            Arg::new("save")
+                .long("save")
+                .value_name("BOOL")
+                .help("Save the temporary playground snapshot on normal exit")
+                .action(ArgAction::Set)
+                .num_args(0..=1)
+                .default_value("false")
+                .default_missing_value("true")
+                .value_parser(BoolishValueParser::new()),
         )
 }
 
@@ -90,7 +102,40 @@ fn main() -> Result<()> {
             .get_one::<String>("playground_id")
             .context("missing playground_id")?,
         matches.get_one::<String>("agent_id").map(String::as_str),
+        *matches.get_one::<bool>("save").unwrap_or(&false),
     )?;
 
     process::exit(exit_code);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_cli;
+
+    #[test]
+    fn run_command_does_not_save_by_default() {
+        let matches = build_cli()
+            .try_get_matches_from(["apg", "demo"])
+            .expect("cli should parse");
+
+        assert_eq!(matches.get_one::<bool>("save"), Some(&false));
+    }
+
+    #[test]
+    fn run_command_accepts_explicit_save_flag() {
+        let matches = build_cli()
+            .try_get_matches_from(["apg", "demo", "--save"])
+            .expect("cli should parse");
+
+        assert_eq!(matches.get_one::<bool>("save"), Some(&true));
+    }
+
+    #[test]
+    fn run_command_allows_disabling_save() {
+        let matches = build_cli()
+            .try_get_matches_from(["apg", "demo", "--save=false"])
+            .expect("cli should parse");
+
+        assert_eq!(matches.get_one::<bool>("save"), Some(&false));
+    }
 }
