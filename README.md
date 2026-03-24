@@ -28,11 +28,11 @@
 
 ## Motivation
 
-Agent harnesses are very useful, but they are designed to be launched from a specific working directory.
+Agent harnesses are very useful, but they are designed to be launched from a specific working directory, like a codebase or a project folder, to perform a series of tasks. 
 
-Sometimes we only want to use them for a quick operation, such as calling a remote service through MCP, or for a one-off task such as searching the web and writing a short report. In those cases, manually creating a fresh working directory first is unnecessary friction.
+Sometimes we only want to use them for a quick operation, such as calling a remote service through MCP, or for a one-off task such as searching the web and writing a short report. In those cases, manually creating and cleaning up a temporary working directory is unnecessary friction.
 
-`apg` (abbrv. for "agent playground") CLI solves this by letting you define a set of template working directories, called playgrounds, and spin up temporary copies from them to launch an agent. When the work is done, the temporary directory is cleaned up automatically (unless you choose to keep it).
+`apg` (abbrv. for "agent playground") CLI solves this by letting you define a set of template working directories, i.e. playgrounds, and spin up temporary copies from them to launch an agent. When the work is done, the temporary directory is cleaned up automatically (unless you choose to keep it).
 
 ## Install
 
@@ -48,42 +48,23 @@ cargo install agent-playground
 curl https://github.com/observerw/agent-playground/releases/latest/download/install.sh | sh
 ```
 
-The installer supports:
-
-- `APG_INSTALL_DIR=/custom/bin` to choose the install directory
-- `APG_VERSION=0.1.0` to pin a specific release
-- `APG_REPO=<owner>/<repo>` if you run the unpatched template directly
-
 ## Usage
 
-Initialize a playground:
-
 ```bash
+# initialize a playground in ~/.config/agent-playground/playgrounds
+# choose a proper name for your playground, e.g. "notion" for notion MCP agent
 apg init demo
-```
-
-Initialize a playground and include specific agent config templates:
-
-```bash
+# you can also initialize a playground and include specific agent config templates
 apg init demo --agent claude --agent codex
-```
 
-List all playgrounds:
-
-```bash
+# list all configured playgrounds
 apg list
-```
 
-Run a playground with the default agent:
-
-```bash
+# run a playground with the default agent
+# almost equal to `cd /some/temp/dir && claude`
 apg demo
-```
-
-Run a playground with a specific agent:
-
-```bash
-apg demo --agent opencode
+# or specify the agent to run with
+apg demo --agent codex
 ```
 
 When the agent exits, `apg` asks whether to keep the temporary playground copy. Enter `y` to save it under the configured archive directory, or press Enter to discard it.
@@ -111,4 +92,6 @@ Each playground gets its own `apg.toml`:
 description = "TODO: describe demo"
 ```
 
-If you pass `--agent <id>` to `apg init`, `apg` also copies `templates/.<id>/` into the new playground. Repeat `--agent` to initialize multiple agent config directories.
+## License
+
+MIT
