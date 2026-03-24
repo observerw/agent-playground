@@ -266,7 +266,7 @@ mod tests {
     #[cfg(windows)]
     fn command_recording_env(var_name: &str) -> String {
         format!(
-            "echo %{var_name}%>env.txt && if exist .env exit /b 1 && if exist apg.toml exit /b 1"
+            "powershell -NoProfile -Command \"[System.IO.File]::WriteAllText('env.txt', $env:{var_name})\" && if exist .env exit /b 1 && if exist apg.toml exit /b 1"
         )
     }
 
@@ -593,7 +593,6 @@ mod tests {
 
         let exit_code = run_playground(&config, "demo", None, true)?;
         let snapshot = single_saved_snapshot(save_root.path())?;
-
         assert_eq!(exit_code, 0);
         assert_eq!(fs::read_to_string(snapshot.join("env.txt"))?, "token-123");
         assert!(!snapshot.join(".env").exists());

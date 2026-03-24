@@ -578,7 +578,11 @@ load_env = true"#,
     fn respects_absolute_saved_playgrounds_dir() {
         let temp_dir = TempDir::new().expect("temp dir");
         let archive_dir = TempDir::new().expect("archive dir");
-        let archive_path = archive_dir.path().display().to_string();
+        let archive_path = archive_dir
+            .path()
+            .display()
+            .to_string()
+            .replace('\\', "\\\\");
         fs::write(
             temp_dir.path().join("config.toml"),
             format!(
