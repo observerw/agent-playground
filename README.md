@@ -96,8 +96,6 @@ description = "TODO: describe demo"
 load_env = false
 ```
 
-JSON Schema for these files can be generated directly from `agent_playground::config::RootConfigFile::json_schema()` and `agent_playground::config::PlaygroundConfigFile::json_schema()`.
-
 ## License
 
 MIT
