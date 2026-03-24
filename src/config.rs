@@ -6,12 +6,14 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use askama::Template;
+use include_dir::{Dir, include_dir};
 use serde::Deserialize;
 
 const APP_CONFIG_DIR: &str = "agent-playground";
 const ROOT_CONFIG_FILE_NAME: &str = "config.toml";
 const PLAYGROUND_CONFIG_FILE_NAME: &str = "apg.toml";
 const PLAYGROUNDS_DIR_NAME: &str = "playgrounds";
+static TEMPLATE_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/templates");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigPaths {
@@ -85,6 +87,7 @@ pub struct InitResult {
     pub playground_id: String,
     pub root_config_created: bool,
     pub playground_config_created: bool,
+    pub initialized_agent_templates: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,12 +130,21 @@ struct PlaygroundConfigTemplate<'a> {
     playground_id: &'a str,
 }
 
-pub fn init_playground(playground_id: &str) -> Result<InitResult> {
-    init_playground_at(ConfigPaths::from_user_config_dir()?, playground_id)
+pub fn init_playground(playground_id: &str, agent_ids: &[String]) -> Result<InitResult> {
+    init_playground_at(
+        ConfigPaths::from_user_config_dir()?,
+        playground_id,
+        agent_ids,
+    )
 }
 
-fn init_playground_at(paths: ConfigPaths, playground_id: &str) -> Result<InitResult> {
+fn init_playground_at(
+    paths: ConfigPaths,
+    playground_id: &str,
+    agent_ids: &[String],
+) -> Result<InitResult> {
     let root_config_created = ensure_root_initialized(&paths)?;
+    let selected_agent_templates = select_agent_templates(agent_ids)?;
 
     let playground_dir = paths.playgrounds_dir.join(playground_id);
     let playground_config_file = playground_dir.join(PLAYGROUND_CONFIG_FILE_NAME);
@@ -152,13 +164,112 @@ fn init_playground_at(paths: ConfigPaths, playground_id: &str) -> Result<InitRes
         .context("failed to render playground config template")?;
     fs::write(&playground_config_file, content)
         .with_context(|| format!("failed to write {}", playground_config_file.display()))?;
+    copy_agent_templates(&playground_dir, &selected_agent_templates)?;
 
     Ok(InitResult {
         paths,
         playground_id: playground_id.to_string(),
         root_config_created,
         playground_config_created: true,
+        initialized_agent_templates: selected_agent_templates
+            .iter()
+            .map(|(agent_id, _)| agent_id.clone())
+            .collect(),
     })
+}
+
+fn select_agent_templates(agent_ids: &[String]) -> Result<Vec<(String, &'static Dir<'static>)>> {
+    let available_templates = available_agent_templates();
+    let available_agent_ids = available_templates.keys().cloned().collect::<Vec<_>>();
+    let mut selected_templates = Vec::new();
+
+    for agent_id in agent_ids {
+        if selected_templates
+            .iter()
+            .any(|(selected_agent_id, _)| selected_agent_id == agent_id)
+        {
+            continue;
+        }
+
+        let template_dir = available_templates.get(agent_id).with_context(|| {
+            format!(
+                "unknown agent template '{agent_id}'. Available templates: {}",
+                if available_agent_ids.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    available_agent_ids.join(", ")
+                }
+            )
+        })?;
+        selected_templates.push((agent_id.clone(), *template_dir));
+    }
+
+    Ok(selected_templates)
+}
+
+fn available_agent_templates() -> BTreeMap<String, &'static Dir<'static>> {
+    let mut agent_templates = BTreeMap::new();
+
+    for template_dir in TEMPLATE_DIR.dirs() {
+        let Some(dir_name) = template_dir
+            .path()
+            .file_name()
+            .and_then(|name| name.to_str())
+        else {
+            continue;
+        };
+        let Some(agent_id) = dir_name.strip_prefix('.') else {
+            continue;
+        };
+
+        if agent_id.is_empty() {
+            continue;
+        }
+
+        agent_templates.insert(agent_id.to_string(), template_dir);
+    }
+
+    agent_templates
+}
+
+fn copy_agent_templates(
+    playground_dir: &Path,
+    agent_templates: &[(String, &'static Dir<'static>)],
+) -> Result<()> {
+    for (agent_id, template_dir) in agent_templates {
+        copy_embedded_dir(template_dir, &playground_dir.join(format!(".{agent_id}")))?;
+    }
+
+    Ok(())
+}
+
+fn copy_embedded_dir(template_dir: &'static Dir<'static>, destination: &Path) -> Result<()> {
+    fs::create_dir_all(destination)
+        .with_context(|| format!("failed to create {}", destination.display()))?;
+
+    for nested_dir in template_dir.dirs() {
+        let nested_dir_name = nested_dir.path().file_name().with_context(|| {
+            format!(
+                "embedded template path has no name: {}",
+                nested_dir.path().display()
+            )
+        })?;
+        copy_embedded_dir(nested_dir, &destination.join(nested_dir_name))?;
+    }
+
+    for file in template_dir.files() {
+        let file_name = file.path().file_name().with_context(|| {
+            format!(
+                "embedded template file has no name: {}",
+                file.path().display()
+            )
+        })?;
+        let destination_file = destination.join(file_name);
+        fs::write(&destination_file, file.contents())
+            .with_context(|| format!("failed to write {}", destination_file.display()))?;
+    }
+
+    Ok(())
 }
 
 fn ensure_root_initialized(paths: &ConfigPaths) -> Result<bool> {
@@ -306,10 +417,11 @@ mod tests {
         let temp_dir = TempDir::new().expect("temp dir");
         let paths = ConfigPaths::from_root_dir(temp_dir.path().to_path_buf());
 
-        let result = init_playground_at(paths.clone(), "demo").expect("init should succeed");
+        let result = init_playground_at(paths.clone(), "demo", &[]).expect("init should succeed");
 
         assert!(result.root_config_created);
         assert!(result.playground_config_created);
+        assert!(result.initialized_agent_templates.is_empty());
         assert!(temp_dir.path().join("config.toml").is_file());
         assert!(
             temp_dir
@@ -318,6 +430,14 @@ mod tests {
                 .join("demo")
                 .join("apg.toml")
                 .is_file()
+        );
+        assert!(
+            !temp_dir
+                .path()
+                .join("playgrounds")
+                .join("demo")
+                .join(".claude")
+                .exists()
         );
 
         let config = AppConfig::load_from_paths(paths).expect("config should load");
@@ -470,14 +590,55 @@ opencode = "opencode"
         let temp_dir = TempDir::new().expect("temp dir");
         let paths = ConfigPaths::from_root_dir(temp_dir.path().to_path_buf());
 
-        init_playground_at(paths.clone(), "demo").expect("initial init should succeed");
-        let error = init_playground_at(paths, "demo").expect_err("duplicate init should fail");
+        init_playground_at(paths.clone(), "demo", &[]).expect("initial init should succeed");
+        let error = init_playground_at(paths, "demo", &[]).expect_err("duplicate init should fail");
 
         assert!(
             error
                 .to_string()
                 .contains("playground 'demo' already exists")
         );
+    }
+
+    #[test]
+    fn init_copies_selected_agent_templates_into_playground() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let paths = ConfigPaths::from_root_dir(temp_dir.path().to_path_buf());
+        let selected_agents = vec!["claude".to_string(), "codex".to_string()];
+
+        let result =
+            init_playground_at(paths, "demo", &selected_agents).expect("init should succeed");
+        let playground_dir = temp_dir.path().join("playgrounds").join("demo");
+
+        assert_eq!(
+            result.initialized_agent_templates,
+            vec!["claude".to_string(), "codex".to_string()]
+        );
+        assert!(
+            playground_dir
+                .join(".claude")
+                .join("settings.json")
+                .is_file()
+        );
+        assert!(playground_dir.join(".codex").join("config.toml").is_file());
+        assert!(!playground_dir.join(".opencode").exists());
+    }
+
+    #[test]
+    fn init_errors_for_unknown_agent_template_before_creating_playground() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let paths = ConfigPaths::from_root_dir(temp_dir.path().to_path_buf());
+        let selected_agents = vec!["missing".to_string()];
+
+        let error = init_playground_at(paths, "demo", &selected_agents)
+            .expect_err("unknown agent template should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("unknown agent template 'missing'")
+        );
+        assert!(!temp_dir.path().join("playgrounds").join("demo").exists());
     }
 
     #[test]

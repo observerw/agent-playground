@@ -6,7 +6,7 @@ use agent_playground::{
     runner::run_playground,
 };
 use anyhow::{Context, Result};
-use clap::{Arg, Command};
+use clap::{Arg, ArgAction, Command};
 
 fn build_cli() -> Command {
     Command::new("agent-playground")
@@ -20,6 +20,15 @@ fn build_cli() -> Command {
                         .value_name("PLAYGROUND_ID")
                         .help("The playground identifier to initialize")
                         .required(true),
+                )
+                .arg(
+                    Arg::new("agent_ids")
+                        .long("agent")
+                        .value_name("AGENT_ID")
+                        .help(
+                            "Initialize the template config directory for an agent. Repeat to include multiple agents.",
+                        )
+                        .action(ArgAction::Append),
                 ),
         )
         .subcommand(Command::new("list").about("List all playgrounds"))
@@ -45,7 +54,11 @@ fn main() -> Result<()> {
         let playground_id = init_matches
             .get_one::<String>("playground_id")
             .expect("required by clap");
-        let result = init_playground(playground_id)?;
+        let selected_agent_ids = init_matches
+            .get_many::<String>("agent_ids")
+            .map(|values| values.cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        let result = init_playground(playground_id, &selected_agent_ids)?;
 
         println!(
             "initialized playground '{}' in {}",
@@ -56,6 +69,12 @@ fn main() -> Result<()> {
                 .join(&result.playground_id)
                 .display()
         );
+        if !result.initialized_agent_templates.is_empty() {
+            println!(
+                "initialized agent config templates: {}",
+                result.initialized_agent_templates.join(", ")
+            );
+        }
         return Ok(());
     }
 

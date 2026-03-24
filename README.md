@@ -1,4 +1,4 @@
-# agent-playground
+# Agent Playground
 
 ```
           _____                    _____                    _____          
@@ -24,15 +24,15 @@
          \/____/                                                           
 ```
 
-`agent-playground` is a CLI for running agent in a temporary playground.
+`agent-playground` is a simple CLI for running agent in a temporary playground.
 
 ## Motivation
 
-Agent harnesses are already very useful, but they usually need to be launched from a specific working directory.
+Agent harnesses are very useful, but they are designed to be launched from a specific working directory.
 
-Sometimes we only want to use them for a quick operation, such as calling a remote service through MCP like Notion, or for a one-off task such as searching the web and writing a short report. In those cases, manually creating a fresh working directory first is unnecessary friction.
+Sometimes we only want to use them for a quick operation, such as calling a remote service through MCP, or for a one-off task such as searching the web and writing a short report. In those cases, manually creating a fresh working directory first is unnecessary friction.
 
-`agent-playground` solves this by letting you define a set of template working directories, called playgrounds, and spin up temporary copies from them to launch an agent. When the work is done, the temporary directory is cleaned up automatically (unless you choose to keep it).
+`apg` (abbrv. for "agent playground") CLI solves this by letting you define a set of template working directories, called playgrounds, and spin up temporary copies from them to launch an agent. When the work is done, the temporary directory is cleaned up automatically (unless you choose to keep it).
 
 ## Install
 
@@ -54,25 +54,18 @@ The installer supports:
 - `APG_VERSION=0.1.0` to pin a specific release
 - `APG_REPO=<owner>/<repo>` if you run the unpatched template directly
 
-## Release
-
-This repository is configured to publish to crates.io from GitHub Actions via trusted publishing.
-
-On crates.io, open `agent-playground` and go to `Settings -> Trusted Publishing`, then add this GitHub configuration:
-
-- Repository owner: `observerw`
-- Repository name: `agent-playground`
-- Workflow filename: `release.yml`
-- Environment: `release`
-
-The release workflow publishes when you push a tag like `v0.1.0`, and it uses `rust-lang/crates-io-auth-action@v1` to exchange the GitHub Actions OIDC token for a short-lived crates.io publish token.
-
 ## Usage
 
 Initialize a playground:
 
 ```bash
 apg init demo
+```
+
+Initialize a playground and include specific agent config templates:
+
+```bash
+apg init demo --agent claude --agent codex
 ```
 
 List all playgrounds:
@@ -117,3 +110,5 @@ Each playground gets its own `apg.toml`:
 ```toml
 description = "TODO: describe demo"
 ```
+
+If you pass `--agent <id>` to `apg init`, `apg` also copies `templates/.<id>/` into the new playground. Repeat `--agent` to initialize multiple agent config directories.
