@@ -80,6 +80,8 @@ The CLI stores configuration under `~/.config/agent-playground`.
 
 ```toml
 default_agent = "claude"
+# whether to load each playground template's `.env` into the agent process environment
+# (the `.env` file itself is not copied into the temp/saved playground when enabled)
 load_env = false
 saved_playgrounds_dir = "~/Download/saved-playgrounds"
 
