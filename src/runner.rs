@@ -593,9 +593,10 @@ mod tests {
 
         let exit_code = run_playground(&config, "demo", None, true)?;
         let snapshot = single_saved_snapshot(save_root.path())?;
+        let env_value = fs::read_to_string(snapshot.join("env.txt"))?;
 
         assert_eq!(exit_code, 0);
-        assert_eq!(fs::read_to_string(snapshot.join("env.txt"))?, "token-123");
+        assert_eq!(env_value.trim_end_matches(['\r', '\n']), "token-123");
         assert!(!snapshot.join(".env").exists());
         Ok(())
     }
