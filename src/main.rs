@@ -4,12 +4,10 @@ use agent_playground::{
     config::{AppConfig, init_playground},
     listing::list_playgrounds,
     runner::run_playground,
-    schema::{default_schema_site_dir, write_schema_site},
 };
 use anyhow::{Context, Result};
 use clap::builder::BoolishValueParser;
 use clap::{Arg, ArgAction, Command};
-use std::path::PathBuf;
 
 fn build_cli() -> Command {
     Command::new("agent-playground")
@@ -35,18 +33,6 @@ fn build_cli() -> Command {
                 ),
         )
         .subcommand(Command::new("list").about("List all playgrounds"))
-        .subcommand(
-            Command::new("schema")
-                .about("Generate JSON Schema files and a GitHub Pages site")
-                .arg(
-                    Arg::new("output_dir")
-                        .long("output-dir")
-                        .value_name("PATH")
-                        .help("Directory where the schema site will be written")
-                        .required(false)
-                        .default_value("target/schema-site"),
-                ),
-        )
         .arg(
             Arg::new("playground_id")
                 .value_name("PLAYGROUND_ID")
@@ -106,16 +92,6 @@ fn main() -> Result<()> {
 
     if let Some(("list", _)) = matches.subcommand() {
         list_playgrounds()?;
-        return Ok(());
-    }
-
-    if let Some(("schema", schema_matches)) = matches.subcommand() {
-        let output_dir = schema_matches
-            .get_one::<String>("output_dir")
-            .map(PathBuf::from)
-            .unwrap_or_else(default_schema_site_dir);
-        write_schema_site(&output_dir)?;
-        println!("generated schema site in {}", output_dir.display());
         return Ok(());
     }
 
@@ -196,21 +172,6 @@ mod tests {
 
         assert!(matches.subcommand_matches("list").is_some());
         assert!(matches.get_one::<String>("playground_id").is_none());
-    }
-
-    #[test]
-    fn schema_subcommand_uses_default_output_dir() {
-        let matches = build_cli()
-            .try_get_matches_from(["apg", "schema"])
-            .expect("cli should parse");
-
-        let Some(("schema", schema_matches)) = matches.subcommand() else {
-            panic!("schema subcommand")
-        };
-        assert_eq!(
-            schema_matches.get_one::<String>("output_dir"),
-            Some(&"target/schema-site".to_string())
-        );
     }
 
     #[test]

@@ -9,6 +9,9 @@ repository = "https://github.com/observerw/agent-playground"
 keywords = ["agent", "cli", "playground"]
 categories = ["command-line-utilities", "development-tools"]
 
+[workspace]
+members = ["xtask"]
+
 [[bin]]
 name = "apg"
 path = "src/main.rs"

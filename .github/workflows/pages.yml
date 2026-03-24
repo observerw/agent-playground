@@ -30,7 +30,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Generate schema site
-        run: cargo run -- schema --output-dir dist-pages
+        run: cargo run -p xtask -- generate-schema-site --output-dir dist-pages
 
       - uses: actions/configure-pages@v5
 
