@@ -1,0 +1,6 @@
+default_agent = "claude"
+saved_playgrounds_dir = '{{ saved_playgrounds_dir }}'
+
+[agent]
+claude = "claude"
+opencode = "opencode"

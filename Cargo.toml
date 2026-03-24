@@ -1,0 +1,23 @@
+[package]
+name = "agent-playground"
+version = "0.1.0"
+edition = "2024"
+description = "A minimal Rust playground runner for trying different coding agents in isolated workspace copies."
+readme = "README.md"
+keywords = ["agent", "cli", "playground"]
+categories = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "apg"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.100"
+askama = "0.14.0"
+clap = "4.6.0"
+dirs = "6.0.0"
+serde = { version = "1.0.228", features = ["derive"] }
+tempfile = "3.23.0"
+toml = "0.9.8"
+
+[dev-dependencies]
