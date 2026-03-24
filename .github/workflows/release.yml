@@ -115,10 +115,10 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          sed "s|__GITHUB_REPOSITORY__|${GITHUB_REPOSITORY}|g" scripts/install.sh > dist/install-apg.sh
-          chmod +x dist/install-apg.sh
+          sed "s|__GITHUB_REPOSITORY__|${GITHUB_REPOSITORY}|g" scripts/install.sh > dist/install.sh
+          chmod +x dist/install.sh
 
       - name: Upload installer
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/install-apg.sh
+          files: dist/install.sh
