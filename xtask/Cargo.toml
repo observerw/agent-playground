@@ -1,0 +1,10 @@
+[package]
+name = "xtask"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+agent-playground = { path = ".." }
+anyhow = "1.0.102"
+clap = "4.6.0"
