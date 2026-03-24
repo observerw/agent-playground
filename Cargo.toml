@@ -1,6 +1,6 @@
 [package]
 name = "agent-playground"
-version = "0.1.0"
+version = "0.0.1"
 edition = "2024"
 description = "CLI for running agent in a temporary playground."
 readme = "README.md"
@@ -14,7 +14,7 @@ name = "apg"
 path = "src/main.rs"
 
 [dependencies]
-anyhow = "1.0.100"
+anyhow = "1.0.102"
 askama = "0.14.0"
 clap = "4.6.0"
 dirs = "6.0.0"
