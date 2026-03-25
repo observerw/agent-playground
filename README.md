@@ -82,32 +82,74 @@ When the agent exits, `apg` asks whether to keep the temporary playground copy. 
 
 The CLI stores configuration under `~/.config/agent-playground`.
 
-`config.toml` defines global settings, known agents, and the default runtime
-behavior inherited by playgrounds:
+The actual layout on disk looks like this:
+
+```text
+~/.config/agent-playground/
+├── config.toml
+├── playgrounds/
+│   ├── demo/
+│   │   ├── apg.toml
+│   │   └── ...
+│   └── another-playground/
+│       ├── apg.toml
+│       └── ...
+└── saved-playgrounds/   # default archive directory; configurable
+```
+
+`config.toml` is the root config file. These are all supported fields:
 
 ```toml
+# Directory used when you choose to keep a temporary playground after the
+# agent exits.
+# Relative paths are resolved against ~/.config/agent-playground.
 saved_playgrounds_dir = "saved-playgrounds"
 
+# Known agents. The key is the agent id used in `apg ... --agent <id>`,
+# and the value is the shell command used to launch it.
 [agent]
+# Built-in default entries created by `apg init`.
 claude = "claude"
 opencode = "opencode"
-# or you can specify a custom command:
+# You can also define custom commands:
 # opencode = "docker run --rm -it opencode/agent:latest"
+# codex = "codex"
 
+# Default runtime options inherited by every playground unless that
+# playground overrides them in its own apg.toml.
 [playground]
+# Default agent id for playground runs.
+# This value must exist in the [agent] table.
 default_agent = "claude"
-# whether to load each playground template's `.env` into the agent process environment
-# (the `.env` file itself is not copied into the temp/saved playground when enabled)
+# Whether to load the playground template's `.env` into the agent process
+# environment when running.
+# When enabled, the `.env` file itself is still not copied into the
+# temporary or saved playground.
 load_env = false
 ```
 
-Each playground gets its own flat `apg.toml`, which can override the inherited
-playground defaults:
+Default values when `config.toml` is first created:
+
+- `saved_playgrounds_dir = "saved-playgrounds"`
+- `[agent].claude = "claude"`
+- `[agent].opencode = "opencode"`
+- `[playground].default_agent = "claude"`
+- `[playground].load_env = false`
+
+Each playground directory contains a flat `apg.toml` (not nested under
+`[playground]`) which can override the inherited root defaults:
 
 ```toml
-# description of the playground, shown in `apg list` output.
+# Human-readable description shown in `apg list` and `apg info`.
 description = "TODO: describe demo"
+
+# Optional playground-specific default agent id.
+# If omitted, the value from config.toml [playground].default_agent is used.
+# This value must exist in the root config's [agent] table.
 default_agent = "codex"
+
+# Optional playground-specific override for whether to load `.env`.
+# If omitted, the value from config.toml [playground].load_env is used.
 load_env = true
 ```
 
