@@ -56,6 +56,7 @@ curl https://github.com/observerw/agent-playground/releases/latest/download/inst
 ```bash
 # initialize a playground in ~/.config/agent-playground/playgrounds
 # choose a proper name for your playground, e.g. "notion" for notion MCP agent
+# `default` is reserved for the empty-playground subcommand and cannot be used as a playground id
 apg init demo
 # you can also initialize a playground and include specific agent config templates
 apg init demo --agent claude --agent codex

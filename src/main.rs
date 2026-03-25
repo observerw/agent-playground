@@ -48,7 +48,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
-    /// Launch the default agent in an empty temporary playground
+    /// Launch an agent in an empty temporary playground (defaults to the configured default agent when `--agent` is not provided)
     Default(DefaultArgs),
     /// Initialize config for a playground
     Init(InitArgs),

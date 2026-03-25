@@ -19,7 +19,7 @@ use tempfile::tempdir;
 use crate::config::{AppConfig, PlaygroundDefinition};
 
 const DOTENV_FILE_NAME: &str = ".env";
-const DEFAULT_PLAYGROUND_ID: &str = "default";
+const DEFAULT_PLAYGROUND_ID: &str = "__default__";
 
 /// Runs a configured playground with the selected agent command.
 ///
@@ -746,6 +746,13 @@ mod tests {
         assert_eq!(
             fs::read_to_string(snapshot.join("agent.txt"))?.trim(),
             "default"
+        );
+        assert!(
+            snapshot
+                .file_name()
+                .expect("snapshot dir name")
+                .to_string_lossy()
+                .starts_with("__default__-")
         );
         assert!(!snapshot.join("notes.txt").exists());
         Ok(())
