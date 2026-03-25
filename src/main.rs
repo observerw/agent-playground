@@ -1,7 +1,11 @@
-use std::process;
+use std::{
+    io::{self, BufRead, Write},
+    path::Path,
+    process,
+};
 
 use agent_playground::{
-    config::{AppConfig, init_playground},
+    config::{AppConfig, init_playground, remove_playground, resolve_playground_dir},
     listing::list_playgrounds,
     runner::run_playground,
 };
@@ -47,6 +51,8 @@ enum Commands {
     Init(InitArgs),
     /// List all playgrounds
     List,
+    /// Remove a playground from the global config directory
+    Remove(RemoveArgs),
 }
 
 #[derive(Debug, Args)]
@@ -63,6 +69,22 @@ struct InitArgs {
         action = ArgAction::Append
     )]
     agent_ids: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+struct RemoveArgs {
+    #[arg(
+        value_name = "PLAYGROUND_ID",
+        help = "The playground identifier to remove"
+    )]
+    playground_id: String,
+    #[arg(
+        short = 'y',
+        long = "yes",
+        help = "Skip confirmation prompt",
+        action = ArgAction::SetTrue
+    )]
+    yes: bool,
 }
 
 #[cfg(test)]
@@ -106,6 +128,54 @@ fn handle_run(cli: Cli) -> Result<()> {
     process::exit(exit_code);
 }
 
+fn prompt_to_remove_playground<R: BufRead, W: Write>(
+    playground_id: &str,
+    playground_dir: &Path,
+    mut input: R,
+    output: &mut W,
+) -> Result<bool> {
+    write!(
+        output,
+        "Remove playground '{}' from {}? [y/N] ",
+        playground_id,
+        playground_dir.display()
+    )?;
+    output.flush()?;
+
+    let mut response = String::new();
+    input.read_line(&mut response)?;
+
+    Ok(matches!(
+        response.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
+}
+
+fn handle_remove(args: RemoveArgs) -> Result<()> {
+    let playground_dir = resolve_playground_dir(&args.playground_id)?;
+
+    if !args.yes
+        && !prompt_to_remove_playground(
+            &args.playground_id,
+            &playground_dir,
+            io::stdin().lock(),
+            &mut io::stdout().lock(),
+        )?
+    {
+        println!("aborted removing playground '{}'", args.playground_id);
+        return Ok(());
+    }
+
+    let result = remove_playground(&args.playground_id)?;
+    println!(
+        "removed playground '{}' from {}",
+        result.playground_id,
+        result.playground_dir.display()
+    );
+
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -115,13 +185,16 @@ fn main() -> Result<()> {
             list_playgrounds()?;
             Ok(())
         }
+        Some(Commands::Remove(args)) => handle_remove(args),
         None => handle_run(cli),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::build_cli;
+    use std::path::Path;
+
+    use super::{build_cli, prompt_to_remove_playground};
 
     #[test]
     fn run_command_does_not_save_by_default() {
@@ -186,6 +259,22 @@ mod tests {
     }
 
     #[test]
+    fn remove_subcommand_parses_playground_and_yes_flag() {
+        let matches = build_cli()
+            .try_get_matches_from(["apg", "remove", "demo", "-y"])
+            .expect("cli should parse");
+
+        let Some(("remove", remove_matches)) = matches.subcommand() else {
+            panic!("remove subcommand")
+        };
+        assert_eq!(
+            remove_matches.get_one::<String>("playground_id"),
+            Some(&"demo".to_string())
+        );
+        assert_eq!(remove_matches.get_one::<bool>("yes"), Some(&true));
+    }
+
+    #[test]
     fn root_command_requires_playground_or_subcommand() {
         let error = build_cli()
             .try_get_matches_from(["apg"])
@@ -195,5 +284,34 @@ mod tests {
             error.kind(),
             clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
         );
+    }
+
+    #[test]
+    fn remove_prompt_accepts_yes_and_rejects_default_enter() {
+        let mut output = Vec::new();
+        let accepted = prompt_to_remove_playground(
+            "demo",
+            Path::new("/tmp/demo"),
+            std::io::Cursor::new("yes\n"),
+            &mut output,
+        )
+        .expect("prompt should succeed");
+
+        assert!(accepted);
+        assert_eq!(
+            String::from_utf8(output).expect("utf8 output"),
+            "Remove playground 'demo' from /tmp/demo? [y/N] "
+        );
+
+        let mut output = Vec::new();
+        let accepted = prompt_to_remove_playground(
+            "demo",
+            Path::new("/tmp/demo"),
+            std::io::Cursor::new("\n"),
+            &mut output,
+        )
+        .expect("prompt should succeed");
+
+        assert!(!accepted);
     }
 }
