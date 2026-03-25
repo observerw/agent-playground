@@ -11,8 +11,9 @@
 
 use std::{
     collections::BTreeMap,
-    fs,
+    fs, io,
     path::{Path, PathBuf},
+    process::{Command, Stdio},
 };
 
 use anyhow::{Context, Result, bail};
@@ -134,6 +135,17 @@ pub struct InitResult {
     pub playground_config_created: bool,
     /// Agent template ids that were copied into the playground directory.
     pub initialized_agent_templates: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+/// Result metadata returned by [`remove_playground`].
+pub struct RemoveResult {
+    /// The config paths used to resolve the playground location.
+    pub paths: ConfigPaths,
+    /// The removed playground id.
+    pub playground_id: String,
+    /// Absolute path to the removed playground directory.
+    pub playground_dir: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -268,6 +280,26 @@ fn init_playground_at(
     playground_id: &str,
     agent_ids: &[String],
 ) -> Result<InitResult> {
+    init_playground_at_with_git(
+        paths,
+        playground_id,
+        agent_ids,
+        git_is_available,
+        init_git_repo,
+    )
+}
+
+fn init_playground_at_with_git<GA, GI>(
+    paths: ConfigPaths,
+    playground_id: &str,
+    agent_ids: &[String],
+    git_is_available: GA,
+    init_git_repo: GI,
+) -> Result<InitResult>
+where
+    GA: Fn() -> Result<bool>,
+    GI: Fn(&Path) -> Result<()>,
+{
     let root_config_created = ensure_root_initialized(&paths)?;
     let selected_agent_templates = select_agent_templates(agent_ids)?;
 
@@ -289,6 +321,9 @@ fn init_playground_at(
         &PlaygroundConfigFile::for_playground(playground_id),
     )?;
     copy_agent_templates(&playground_dir, &selected_agent_templates)?;
+    if git_is_available()? {
+        init_git_repo(&playground_dir)?;
+    }
 
     Ok(InitResult {
         paths,
@@ -300,6 +335,112 @@ fn init_playground_at(
             .map(|(agent_id, _)| agent_id.clone())
             .collect(),
     })
+}
+
+/// Resolves an existing playground directory under the global config root.
+pub fn resolve_playground_dir(playground_id: &str) -> Result<PathBuf> {
+    resolve_playground_dir_at(ConfigPaths::from_user_config_dir()?, playground_id)
+}
+
+/// Removes a playground directory from the global config root.
+pub fn remove_playground(playground_id: &str) -> Result<RemoveResult> {
+    let paths = ConfigPaths::from_user_config_dir()?;
+    remove_playground_at(paths, playground_id)
+}
+
+fn remove_playground_at(paths: ConfigPaths, playground_id: &str) -> Result<RemoveResult> {
+    let playground_dir = resolve_playground_dir_at(paths.clone(), playground_id)?;
+
+    fs::remove_dir_all(&playground_dir)
+        .with_context(|| format!("failed to remove {}", playground_dir.display()))?;
+
+    Ok(RemoveResult {
+        paths,
+        playground_id: playground_id.to_string(),
+        playground_dir,
+    })
+}
+
+fn resolve_playground_dir_at(paths: ConfigPaths, playground_id: &str) -> Result<PathBuf> {
+    validate_playground_id(playground_id)?;
+
+    let playground_dir = paths.playgrounds_dir.join(playground_id);
+    if !playground_dir.exists() {
+        bail!("unknown playground '{playground_id}'");
+    }
+
+    let metadata = fs::symlink_metadata(&playground_dir)
+        .with_context(|| format!("failed to inspect {}", playground_dir.display()))?;
+    if metadata.file_type().is_symlink() {
+        bail!(
+            "playground '{}' cannot be removed because it is a symlink: {}",
+            playground_id,
+            playground_dir.display()
+        );
+    }
+    if !metadata.is_dir() {
+        bail!(
+            "playground '{}' is not a directory: {}",
+            playground_id,
+            playground_dir.display()
+        );
+    }
+
+    Ok(playground_dir)
+}
+
+fn validate_playground_id(playground_id: &str) -> Result<()> {
+    if playground_id.is_empty() {
+        bail!("playground id cannot be empty");
+    }
+    if matches!(playground_id, "." | "..")
+        || playground_id.contains('/')
+        || playground_id.contains('\\')
+    {
+        bail!(
+            "invalid playground id '{}': ids must not contain path separators or parent-directory segments",
+            playground_id
+        );
+    }
+
+    Ok(())
+}
+
+fn git_is_available() -> Result<bool> {
+    match Command::new("git")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+    {
+        Ok(status) => Ok(status.success()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).context("failed to check whether git is available"),
+    }
+}
+
+fn init_git_repo(playground_dir: &Path) -> Result<()> {
+    let status = Command::new("git")
+        .arg("init")
+        .current_dir(playground_dir)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .with_context(|| {
+            format!(
+                "failed to initialize git repository in {}",
+                playground_dir.display()
+            )
+        })?;
+
+    if !status.success() {
+        bail!(
+            "git init exited with status {status} in {}",
+            playground_dir.display()
+        );
+    }
+
+    Ok(())
 }
 
 fn select_agent_templates(agent_ids: &[String]) -> Result<Vec<(String, &'static Dir<'static>)>> {
@@ -522,10 +663,11 @@ where
 mod tests {
     use super::{
         APP_CONFIG_DIR, AppConfig, ConfigPaths, PlaygroundConfigFile, RootConfigFile,
-        init_playground_at, read_toml_file, user_config_base_dir,
+        init_playground_at, init_playground_at_with_git, read_toml_file, remove_playground_at,
+        resolve_playground_dir_at, user_config_base_dir,
     };
     use serde_json::Value;
-    use std::fs;
+    use std::{cell::Cell, fs};
     use tempfile::TempDir;
 
     #[test]
@@ -781,6 +923,56 @@ opencode = "opencode"
     }
 
     #[test]
+    fn remove_deletes_existing_playground_directory() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let paths = ConfigPaths::from_root_dir(temp_dir.path().to_path_buf());
+        let nested_file = temp_dir
+            .path()
+            .join("playgrounds")
+            .join("demo")
+            .join("notes.txt");
+
+        init_playground_at(paths.clone(), "demo", &[]).expect("init should succeed");
+        fs::write(&nested_file, "hello").expect("write nested file");
+
+        let result = remove_playground_at(paths.clone(), "demo").expect("remove should succeed");
+
+        assert_eq!(result.paths, paths);
+        assert_eq!(result.playground_id, "demo");
+        assert_eq!(
+            result.playground_dir,
+            temp_dir.path().join("playgrounds").join("demo")
+        );
+        assert!(!result.playground_dir.exists());
+    }
+
+    #[test]
+    fn remove_errors_for_unknown_playground() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let paths = ConfigPaths::from_root_dir(temp_dir.path().to_path_buf());
+
+        let error =
+            remove_playground_at(paths, "missing").expect_err("missing playground should fail");
+
+        assert!(error.to_string().contains("unknown playground 'missing'"));
+    }
+
+    #[test]
+    fn resolve_playground_dir_rejects_path_traversal_ids() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let paths = ConfigPaths::from_root_dir(temp_dir.path().to_path_buf());
+
+        let error = resolve_playground_dir_at(paths, "../demo")
+            .expect_err("path traversal playground id should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("invalid playground id '../demo'")
+        );
+    }
+
+    #[test]
     fn init_copies_selected_agent_templates_into_playground() {
         let temp_dir = TempDir::new().expect("temp dir");
         let paths = ConfigPaths::from_root_dir(temp_dir.path().to_path_buf());
@@ -802,6 +994,65 @@ opencode = "opencode"
         );
         assert!(playground_dir.join(".codex").join("config.toml").is_file());
         assert!(!playground_dir.join(".opencode").exists());
+    }
+
+    #[test]
+    fn init_initializes_git_repo_when_git_is_available() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let paths = ConfigPaths::from_root_dir(temp_dir.path().to_path_buf());
+        let git_init_called = Cell::new(false);
+
+        init_playground_at_with_git(
+            paths,
+            "demo",
+            &[],
+            || Ok(true),
+            |playground_dir| {
+                git_init_called.set(true);
+                fs::create_dir(playground_dir.join(".git")).expect("create .git directory");
+                Ok(())
+            },
+        )
+        .expect("init should succeed");
+
+        assert!(git_init_called.get());
+        assert!(
+            temp_dir
+                .path()
+                .join("playgrounds")
+                .join("demo")
+                .join(".git")
+                .is_dir()
+        );
+    }
+
+    #[test]
+    fn init_skips_git_repo_when_git_is_unavailable() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let paths = ConfigPaths::from_root_dir(temp_dir.path().to_path_buf());
+        let git_init_called = Cell::new(false);
+
+        init_playground_at_with_git(
+            paths,
+            "demo",
+            &[],
+            || Ok(false),
+            |_| {
+                git_init_called.set(true);
+                Ok(())
+            },
+        )
+        .expect("init should succeed");
+
+        assert!(!git_init_called.get());
+        assert!(
+            !temp_dir
+                .path()
+                .join("playgrounds")
+                .join("demo")
+                .join(".git")
+                .exists()
+        );
     }
 
     #[test]
