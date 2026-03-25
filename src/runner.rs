@@ -1,3 +1,9 @@
+//! Runtime execution for launching an agent inside a temporary playground.
+//!
+//! The runner copies playground files into a throwaway directory, executes the
+//! selected agent command in that directory, and optionally persists the final
+//! state as a snapshot.
+
 use std::{
     fs,
     io::{self, BufRead, IsTerminal, Write},
@@ -14,6 +20,28 @@ use crate::config::{AppConfig, PlaygroundDefinition};
 
 const DOTENV_FILE_NAME: &str = ".env";
 
+/// Runs a configured playground with the selected agent command.
+///
+/// The execution flow is:
+///
+/// 1. Resolve the playground and agent command from [`AppConfig`].
+/// 2. Copy playground contents into a temporary directory.
+/// 3. Optionally load `.env` key-value pairs into the child process.
+/// 4. Run the agent command in the temporary directory.
+/// 5. Optionally save a snapshot of that directory on normal exit.
+///
+/// When `selected_agent_id` is `None`, the module falls back to the
+/// playground default agent and then to the root default agent.
+///
+/// # Returns
+///
+/// Returns the exit code that should be used by the caller process.
+///
+/// # Errors
+///
+/// Returns an error if configuration references are invalid, filesystem
+/// operations fail, environment parsing fails, or the agent process cannot be
+/// started or yields an unrepresentable status.
 pub fn run_playground(
     config: &AppConfig,
     playground_id: &str,

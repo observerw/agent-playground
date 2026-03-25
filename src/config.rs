@@ -1,3 +1,14 @@
+//! Configuration models and loaders for `agent-playground`.
+//!
+//! This module owns three related concerns:
+//! - Resolving where configuration files live on disk.
+//! - Reading/writing root and per-playground TOML config files.
+//! - Producing a fully resolved [`crate::config::AppConfig`] used by runtime
+//!   commands.
+//!
+//! The primary entry points are [`crate::config::AppConfig::load`] and
+//! [`crate::config::init_playground`].
+
 use std::{
     collections::BTreeMap,
     fs,
@@ -16,19 +27,29 @@ const PLAYGROUNDS_DIR_NAME: &str = "playgrounds";
 static TEMPLATE_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/templates");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Canonical filesystem paths used by the application config layer.
 pub struct ConfigPaths {
+    /// Root directory containing all app-managed config state.
+    ///
+    /// By default this resolves to `$HOME/.config/agent-playground`.
     pub root_dir: PathBuf,
+    /// Path to the root config file (`config.toml`).
     pub config_file: PathBuf,
+    /// Directory containing per-playground subdirectories.
     pub playgrounds_dir: PathBuf,
 }
 
 impl ConfigPaths {
+    /// Builds config paths from the current user's config base directory.
+    ///
+    /// This resolves to `$HOME/.config/agent-playground` on all platforms.
     pub fn from_user_config_dir() -> Result<Self> {
         let config_dir = user_config_base_dir()?;
 
         Ok(Self::from_root_dir(config_dir.join(APP_CONFIG_DIR)))
     }
 
+    /// Builds config paths from an explicit root directory.
     pub fn from_root_dir(root_dir: PathBuf) -> Self {
         Self {
             config_file: root_dir.join(ROOT_CONFIG_FILE_NAME),
@@ -44,16 +65,30 @@ fn user_config_base_dir() -> Result<PathBuf> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Fully resolved application configuration used by command execution.
+///
+/// Values in this struct are post-processed defaults/overrides loaded from
+/// [`RootConfigFile`] and playground-specific [`PlaygroundConfigFile`] entries.
 pub struct AppConfig {
+    /// Resolved filesystem locations for all config assets.
     pub paths: ConfigPaths,
+    /// Agent identifier to shell command mapping from `[agent]`.
     pub agents: BTreeMap<String, String>,
+    /// Fallback agent id used when no more specific selection exists.
     pub default_agent: String,
+    /// Whether `.env` should be loaded from a playground before agent launch.
     pub load_env: bool,
+    /// Destination directory where saved snapshot copies are written.
     pub saved_playgrounds_dir: PathBuf,
+    /// All discovered playground definitions keyed by playground id.
     pub playgrounds: BTreeMap<String, PlaygroundDefinition>,
 }
 
 impl AppConfig {
+    /// Loads and validates application configuration from the default location.
+    ///
+    /// If the root config does not exist yet, default files/directories are
+    /// created first.
     pub fn load() -> Result<Self> {
         Self::load_from_paths(ConfigPaths::from_user_config_dir()?)
     }
@@ -87,38 +122,62 @@ impl AppConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Result metadata returned by [`init_playground`].
 pub struct InitResult {
+    /// The config paths used for initialization.
     pub paths: ConfigPaths,
+    /// The initialized playground id.
     pub playground_id: String,
+    /// Whether `config.toml` was created as part of this call.
     pub root_config_created: bool,
+    /// Whether the playground config file (`apg.toml`) was created.
     pub playground_config_created: bool,
+    /// Agent template ids that were copied into the playground directory.
     pub initialized_agent_templates: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// A resolved playground entry loaded from the `playgrounds/` directory.
 pub struct PlaygroundDefinition {
+    /// Stable playground identifier (directory name).
     pub id: String,
+    /// Human-readable description from `apg.toml`.
     pub description: String,
+    /// Optional per-playground default agent override.
     pub default_agent: Option<String>,
+    /// Absolute path to the playground directory.
     pub directory: PathBuf,
+    /// Path to this playground's `apg.toml` file.
     pub config_file: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+/// Serializable model for the root `config.toml` file.
 pub struct RootConfigFile {
+    /// Agent id to command mapping under `[agent]`.
     #[serde(default)]
     pub agent: BTreeMap<String, String>,
+    /// Optional default agent id override.
+    ///
+    /// If omitted, the built-in default is used.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_agent: Option<String>,
+    /// Optional flag controlling `.env` loading in playground runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub load_env: Option<bool>,
+    /// Optional directory for persisted playground snapshots.
+    ///
+    /// Relative paths are resolved against [`ConfigPaths::root_dir`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub saved_playgrounds_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+/// Serializable model for a playground's `apg.toml` file.
 pub struct PlaygroundConfigFile {
+    /// Human-readable description shown in listing output.
     pub description: String,
+    /// Optional playground-local default agent id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_agent: Option<String>,
 }
@@ -132,6 +191,7 @@ struct ResolvedRootConfig {
 }
 
 impl RootConfigFile {
+    /// Returns a JSON Schema for the root config file format.
     pub fn json_schema() -> Schema {
         schema_for!(Self)
     }
@@ -177,6 +237,7 @@ impl RootConfigFile {
 }
 
 impl PlaygroundConfigFile {
+    /// Returns a JSON Schema for the playground config file format.
     pub fn json_schema() -> Schema {
         schema_for!(Self)
     }
@@ -189,6 +250,11 @@ impl PlaygroundConfigFile {
     }
 }
 
+/// Initializes a new playground directory and config file.
+///
+/// The playground is created under `playgrounds/<playground_id>`.
+/// When `agent_ids` are provided, matching embedded templates are copied
+/// to `.<agent_id>/` directories in the playground root.
 pub fn init_playground(playground_id: &str, agent_ids: &[String]) -> Result<InitResult> {
     init_playground_at(
         ConfigPaths::from_user_config_dir()?,
