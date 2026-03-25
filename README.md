@@ -57,6 +57,7 @@ curl https://github.com/observerw/agent-playground/releases/latest/download/inst
 # initialize a playground in ~/.config/agent-playground/playgrounds
 # choose a proper name for your playground, e.g. "notion" for notion MCP agent
 # when git is available, this also initializes a git repository in the new playground
+# `default` is reserved for the empty-playground subcommand and cannot be used as a playground id
 apg init demo
 # you can also initialize a playground and include specific agent config templates
 apg init demo --agent claude --agent codex
@@ -67,8 +68,12 @@ apg list
 # run a playground with the default agent
 # almost equal to `cd /some/temp/dir && claude`
 apg demo
+# run the default agent in an empty temporary playground
+apg default
 # or specify the agent to run with
 apg demo --agent codex
+# or specify the agent for the empty playground
+apg default --agent codex
 ```
 
 When the agent exits, `apg` asks whether to keep the temporary playground copy. Enter `y` to save it under the configured archive directory, or press Enter to discard it.

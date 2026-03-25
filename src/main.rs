@@ -8,7 +8,7 @@ use agent_playground::{
     config::{AppConfig, init_playground, remove_playground, resolve_playground_dir},
     info::show_playground_info,
     listing::list_playgrounds,
-    runner::run_playground,
+    runner::{run_default_playground, run_playground},
 };
 use anyhow::{Context, Result};
 use clap::{ArgAction, Args, Parser, Subcommand};
@@ -48,6 +48,8 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    /// Launch an agent in an empty temporary playground (defaults to the configured default agent when `--agent` is not provided)
+    Default(DefaultArgs),
     /// Initialize config for a playground
     Init(InitArgs),
     /// Show detailed information for a playground
@@ -56,6 +58,23 @@ enum Commands {
     List,
     /// Remove a playground from the global config directory
     Remove(RemoveArgs),
+}
+
+#[derive(Debug, Args)]
+struct DefaultArgs {
+    #[arg(
+        long = "agent",
+        value_name = "AGENT_ID",
+        help = "The agent identifier to use for this run",
+        required = false
+    )]
+    agent_id: Option<String>,
+    #[arg(
+        long = "save",
+        help = "Save the temporary playground snapshot on normal exit",
+        action = ArgAction::SetTrue
+    )]
+    save: bool,
 }
 
 #[derive(Debug, Args)]
@@ -140,6 +159,13 @@ fn handle_run(cli: Cli) -> Result<()> {
     process::exit(exit_code);
 }
 
+fn handle_default(args: DefaultArgs) -> Result<()> {
+    let config = AppConfig::load()?;
+    let exit_code = run_default_playground(&config, args.agent_id.as_deref(), args.save)?;
+
+    process::exit(exit_code);
+}
+
 fn prompt_to_remove_playground<R: BufRead, W: Write>(
     playground_id: &str,
     playground_dir: &Path,
@@ -192,6 +218,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        Some(Commands::Default(args)) => handle_default(args),
         Some(Commands::Init(args)) => handle_init(args),
         Some(Commands::Info(args)) => show_playground_info(&args.playground_id),
         Some(Commands::List) => {
@@ -259,6 +286,22 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["claude".to_string(), "codex".to_string()]
         );
+    }
+
+    #[test]
+    fn default_subcommand_parses_agent_and_save_flag() {
+        let matches = build_cli()
+            .try_get_matches_from(["apg", "default", "--agent", "codex", "--save"])
+            .expect("cli should parse");
+
+        let Some(("default", default_matches)) = matches.subcommand() else {
+            panic!("default subcommand")
+        };
+        assert_eq!(
+            default_matches.get_one::<String>("agent_id"),
+            Some(&"codex".to_string())
+        );
+        assert_eq!(default_matches.get_one::<bool>("save"), Some(&true));
     }
 
     #[test]

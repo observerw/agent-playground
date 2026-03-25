@@ -19,6 +19,7 @@ use tempfile::tempdir;
 use crate::config::{AppConfig, PlaygroundDefinition};
 
 const DOTENV_FILE_NAME: &str = ".env";
+const DEFAULT_PLAYGROUND_ID: &str = "__default__";
 
 /// Runs a configured playground with the selected agent command.
 ///
@@ -64,9 +65,62 @@ pub fn run_playground(
     copy_playground_contents(playground, load_env, temp_dir.path())?;
     let playground_env = load_playground_env(playground, load_env)?;
 
+    run_agent_in_directory(
+        temp_dir.path(),
+        agent_id,
+        agent_command,
+        playground_env,
+        save_on_exit,
+        &config.saved_playgrounds_dir,
+        playground_id,
+    )
+}
+
+/// Runs the selected agent inside an empty temporary playground directory.
+///
+/// This is similar to [`run_playground`], but it does not require a configured
+/// playground template and starts from an empty working directory instead.
+pub fn run_default_playground(
+    config: &AppConfig,
+    selected_agent_id: Option<&str>,
+    save_on_exit: bool,
+) -> Result<i32> {
+    let default_agent = config
+        .playground_defaults
+        .default_agent
+        .as_deref()
+        .context("default playground config is missing default_agent")?;
+    let agent_id = selected_agent_id.unwrap_or(&default_agent);
+    let agent_command = config
+        .agents
+        .get(agent_id)
+        .with_context(|| format!("unknown agent '{agent_id}'"))?;
+
+    let temp_dir = tempdir().context("failed to create temporary playground directory")?;
+
+    run_agent_in_directory(
+        temp_dir.path(),
+        agent_id,
+        agent_command,
+        Vec::new(),
+        save_on_exit,
+        &config.saved_playgrounds_dir,
+        DEFAULT_PLAYGROUND_ID,
+    )
+}
+
+fn run_agent_in_directory(
+    working_dir: &Path,
+    agent_id: &str,
+    agent_command: &str,
+    playground_env: Vec<(String, String)>,
+    save_on_exit: bool,
+    saved_playgrounds_dir: &Path,
+    playground_id: &str,
+) -> Result<i32> {
     let status = build_agent_command(agent_command)
         .envs(playground_env)
-        .current_dir(temp_dir.path())
+        .current_dir(working_dir)
         .status()
         .with_context(|| format!("failed to start agent '{agent_id}'"))?;
 
@@ -80,11 +134,8 @@ pub fn run_playground(
         ) && prompt_to_save_playground_snapshot(io::stdin().lock(), &mut io::stdout().lock())?);
 
     if should_save {
-        let saved_path = save_playground_snapshot(
-            temp_dir.path(),
-            &config.saved_playgrounds_dir,
-            playground_id,
-        )?;
+        let saved_path =
+            save_playground_snapshot(working_dir, saved_playgrounds_dir, playground_id)?;
         println!("saved playground snapshot to {}", saved_path.display());
     }
 
@@ -313,8 +364,8 @@ mod tests {
 
     use super::{
         copy_playground_contents, exit_code_from_status, prompt_to_save_playground_snapshot,
-        run_playground, save_playground_snapshot, should_prompt_to_save_playground_snapshot,
-        should_save_playground_snapshot,
+        run_default_playground, run_playground, save_playground_snapshot,
+        should_prompt_to_save_playground_snapshot, should_save_playground_snapshot,
     };
 
     #[cfg(unix)]
@@ -637,6 +688,65 @@ mod tests {
         );
         assert_eq!(fs::read_to_string(snapshot.join("notes.txt"))?, "hello");
         assert!(!snapshot.join("apg.toml").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn runs_empty_default_playground_with_default_agent() -> Result<()> {
+        let source_dir = tempdir()?;
+        let save_root = tempdir()?;
+        let config = make_config(
+            source_dir.path(),
+            save_root.path(),
+            "demo",
+            Some("claude"),
+            None,
+            None,
+            &[("claude", command_writing_marker("default"))],
+        )?;
+
+        let exit_code = run_default_playground(&config, None, true)?;
+        let snapshot = single_saved_snapshot(save_root.path())?;
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(
+            fs::read_to_string(snapshot.join("agent.txt"))?.trim(),
+            "default"
+        );
+        assert!(!snapshot.join("notes.txt").exists());
+        assert!(
+            snapshot
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with("__default__-"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn selected_agent_overrides_default_in_empty_default_playground() -> Result<()> {
+        let source_dir = tempdir()?;
+        let save_root = tempdir()?;
+        let config = make_config(
+            source_dir.path(),
+            save_root.path(),
+            "demo",
+            Some("claude"),
+            None,
+            None,
+            &[
+                ("claude", command_writing_marker("default")),
+                ("codex", command_writing_marker("selected")),
+            ],
+        )?;
+
+        let exit_code = run_default_playground(&config, Some("codex"), true)?;
+        let snapshot = single_saved_snapshot(save_root.path())?;
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(
+            fs::read_to_string(snapshot.join("agent.txt"))?.trim(),
+            "selected"
+        );
         Ok(())
     }
 
