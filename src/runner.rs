@@ -90,7 +90,7 @@ pub fn run_default_playground(
         .default_agent
         .as_deref()
         .context("default playground config is missing default_agent")?;
-    let agent_id = selected_agent_id.unwrap_or(&default_agent);
+    let agent_id = selected_agent_id.unwrap_or(default_agent);
     let agent_command = config
         .agents
         .get(agent_id)
