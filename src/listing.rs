@@ -1,9 +1,23 @@
+//! Utilities for listing configured playgrounds in a human-readable table.
+//!
+//! This module is used by the CLI `list` subcommand and focuses on
+//! presentation-oriented output.
+
 use std::collections::BTreeMap;
 
 use anyhow::Result;
 
 use crate::config::{AppConfig, PlaygroundDefinition};
 
+/// Loads application configuration and prints all configured playgrounds.
+///
+/// The output is a simple fixed-width table with `PLAYGROUND` and
+/// `DESCRIPTION` columns. If no playgrounds are configured, a fallback
+/// message is printed instead.
+///
+/// # Errors
+///
+/// Returns an error when configuration loading fails.
 pub fn list_playgrounds() -> Result<()> {
     let config = AppConfig::load()?;
     print!("{}", format_playgrounds(&config.playgrounds));

@@ -1,3 +1,8 @@
+//! JSON Schema site generation utilities.
+//!
+//! This module materializes schema files for the public configuration models
+//! and writes a tiny static index page that can be hosted as documentation.
+
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -11,6 +16,20 @@ use crate::config::{PlaygroundConfigFile, RootConfigFile};
 const ROOT_SCHEMA_FILE_NAME: &str = "root-config.schema.json";
 const PLAYGROUND_SCHEMA_FILE_NAME: &str = "playground-config.schema.json";
 
+/// Generates JSON Schema artifacts and an index page into `output_dir`.
+///
+/// The command writes:
+///
+/// - `schemas/root-config.schema.json`
+/// - `schemas/playground-config.schema.json`
+/// - `index.html`
+///
+/// Existing files at those paths are overwritten.
+///
+/// # Errors
+///
+/// Returns an error when output directories cannot be created, schema values
+/// cannot be serialized, or files cannot be written.
 pub fn write_schema_site(output_dir: &Path) -> Result<()> {
     let schemas_dir = output_dir.join("schemas");
     fs::create_dir_all(&schemas_dir)
@@ -34,6 +53,10 @@ pub fn write_schema_site(output_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Returns the default output location used for generated schema artifacts.
+///
+/// The returned path is relative to the current working directory:
+/// `target/schema-site`.
 pub fn default_schema_site_dir() -> PathBuf {
     PathBuf::from("target").join("schema-site")
 }
