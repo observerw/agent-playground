@@ -66,8 +66,12 @@ apg list
 # run a playground with the default agent
 # almost equal to `cd /some/temp/dir && claude`
 apg demo
+# run the default agent in an empty temporary playground
+apg default
 # or specify the agent to run with
 apg demo --agent codex
+# or specify the agent for the empty playground
+apg default --agent codex
 ```
 
 When the agent exits, `apg` asks whether to keep the temporary playground copy. Enter `y` to save it under the configured archive directory, or press Enter to discard it.
