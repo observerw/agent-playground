@@ -73,7 +73,7 @@ impl AppConfig {
             bail!("default agent '{default_agent}' is not defined in [agent]");
         }
 
-        let playgrounds = load_playgrounds(&paths.playgrounds_dir)?;
+        let playgrounds = load_playgrounds(&paths.playgrounds_dir, &agents)?;
 
         Ok(Self {
             paths,
@@ -99,6 +99,7 @@ pub struct InitResult {
 pub struct PlaygroundDefinition {
     pub id: String,
     pub description: String,
+    pub default_agent: Option<String>,
     pub directory: PathBuf,
     pub config_file: PathBuf,
 }
@@ -118,6 +119,8 @@ pub struct RootConfigFile {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct PlaygroundConfigFile {
     pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_agent: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -181,6 +184,7 @@ impl PlaygroundConfigFile {
     fn for_playground(playground_id: &str) -> Self {
         Self {
             description: format!("TODO: describe {playground_id}"),
+            default_agent: None,
         }
     }
 }
@@ -360,7 +364,10 @@ fn resolve_saved_playgrounds_dir(root_dir: &Path, configured_path: PathBuf) -> P
     root_dir.join(configured_path)
 }
 
-fn load_playgrounds(playgrounds_dir: &Path) -> Result<BTreeMap<String, PlaygroundDefinition>> {
+fn load_playgrounds(
+    playgrounds_dir: &Path,
+    agents: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, PlaygroundDefinition>> {
     if !playgrounds_dir.exists() {
         return Ok(BTreeMap::new());
     }
@@ -404,12 +411,18 @@ fn load_playgrounds(playgrounds_dir: &Path) -> Result<BTreeMap<String, Playgroun
 
         let playground_config: PlaygroundConfigFile = read_toml_file(&config_file)?;
         let id = entry.file_name().to_string_lossy().into_owned();
+        if let Some(default_agent) = playground_config.default_agent.as_deref()
+            && !agents.contains_key(default_agent)
+        {
+            bail!("playground '{id}' default agent '{default_agent}' is not defined in [agent]");
+        }
 
         playgrounds.insert(
             id.clone(),
             PlaygroundDefinition {
                 id,
                 description: playground_config.description,
+                default_agent: playground_config.default_agent,
                 directory,
                 config_file,
             },
@@ -510,6 +523,14 @@ mod tests {
                 .description,
             "TODO: describe demo"
         );
+        assert_eq!(
+            config
+                .playgrounds
+                .get("demo")
+                .expect("demo playground")
+                .default_agent,
+            None
+        );
     }
 
     #[test]
@@ -533,7 +554,8 @@ codex = "codex --fast"
         fs::create_dir_all(&playground_dir).expect("create playground dir");
         fs::write(
             playground_dir.join("apg.toml"),
-            r#"description = "Demo playground""#,
+            r#"description = "Demo playground"
+default_agent = "claude""#,
         )
         .expect("write playground config");
 
@@ -555,7 +577,38 @@ codex = "codex --fast"
 
         let playground = config.playgrounds.get("demo").expect("demo playground");
         assert_eq!(playground.description, "Demo playground");
+        assert_eq!(playground.default_agent.as_deref(), Some("claude"));
         assert_eq!(playground.directory, playground_dir);
+    }
+
+    #[test]
+    fn errors_when_playground_default_agent_is_not_defined() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        fs::write(
+            temp_dir.path().join("config.toml"),
+            r#"[agent]
+claude = "claude"
+"#,
+        )
+        .expect("write root config");
+        let playground_dir = temp_dir.path().join("playgrounds").join("demo");
+        fs::create_dir_all(&playground_dir).expect("create playground dir");
+        fs::write(
+            playground_dir.join("apg.toml"),
+            r#"description = "Demo playground"
+default_agent = "codex""#,
+        )
+        .expect("write playground config");
+
+        let error =
+            AppConfig::load_from_paths(ConfigPaths::from_root_dir(temp_dir.path().to_path_buf()))
+                .expect_err("undefined playground default agent should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("playground 'demo' default agent 'codex' is not defined")
+        );
     }
 
     #[test]
@@ -804,6 +857,7 @@ claude = "claude"
 
         assert_eq!(schema["type"], Value::String("object".to_string()));
         assert!(schema["properties"]["description"].is_object());
+        assert!(schema["properties"]["default_agent"].is_object());
         assert_eq!(
             schema["required"],
             Value::Array(vec![Value::String("description".to_string())])
