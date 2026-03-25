@@ -53,17 +53,17 @@ pub fn run_playground(
         .playgrounds
         .get(playground_id)
         .with_context(|| format!("unknown playground '{playground_id}'"))?;
-    let agent_id = selected_agent_id
-        .or(playground.default_agent.as_deref())
-        .unwrap_or(&config.default_agent);
+    let playground_config = config.resolve_playground_config(playground)?;
+    let agent_id = selected_agent_id.unwrap_or(&playground_config.default_agent);
     let agent_command = config
         .agents
         .get(agent_id)
         .with_context(|| format!("unknown agent '{agent_id}'"))?;
+    let load_env = playground_config.load_env;
 
     let temp_dir = tempdir().context("failed to create temporary playground directory")?;
-    copy_playground_contents(playground, config.load_env, temp_dir.path())?;
-    let playground_env = load_playground_env(playground, config.load_env)?;
+    copy_playground_contents(playground, load_env, temp_dir.path())?;
+    let playground_env = load_playground_env(playground, load_env)?;
 
     run_agent_in_directory(
         temp_dir.path(),
@@ -85,7 +85,12 @@ pub fn run_default_playground(
     selected_agent_id: Option<&str>,
     save_on_exit: bool,
 ) -> Result<i32> {
-    let agent_id = selected_agent_id.unwrap_or(&config.default_agent);
+    let default_agent = config
+        .playground_defaults
+        .default_agent
+        .as_deref()
+        .context("default playground config is missing default_agent")?;
+    let agent_id = selected_agent_id.unwrap_or(default_agent);
     let agent_command = config
         .agents
         .get(agent_id)
@@ -355,7 +360,7 @@ mod tests {
     use anyhow::Result;
     use tempfile::tempdir;
 
-    use crate::config::{AppConfig, ConfigPaths, PlaygroundDefinition};
+    use crate::config::{AppConfig, ConfigPaths, PlaygroundConfig, PlaygroundDefinition};
 
     use super::{
         copy_playground_contents, exit_code_from_status, prompt_to_save_playground_snapshot,
@@ -410,6 +415,7 @@ mod tests {
         source_dir: &Path,
         playground_id: &str,
         default_agent: Option<&str>,
+        load_env: Option<bool>,
     ) -> Result<PlaygroundDefinition> {
         let config_file = source_dir.join("apg.toml");
         fs::write(&config_file, "description = 'ignored'")?;
@@ -418,9 +424,12 @@ mod tests {
         Ok(PlaygroundDefinition {
             id: playground_id.to_string(),
             description: "demo".to_string(),
-            default_agent: default_agent.map(str::to_string),
             directory: source_dir.to_path_buf(),
             config_file,
+            playground: PlaygroundConfig {
+                default_agent: default_agent.map(str::to_string),
+                load_env,
+            },
         })
     }
 
@@ -428,11 +437,17 @@ mod tests {
         source_dir: &Path,
         save_root: &Path,
         playground_id: &str,
-        default_agent: &str,
+        default_agent: Option<&str>,
         playground_default_agent: Option<&str>,
+        playground_load_env: Option<bool>,
         agents: &[(&str, String)],
     ) -> Result<AppConfig> {
-        let playground = make_playground(source_dir, playground_id, playground_default_agent)?;
+        let playground = make_playground(
+            source_dir,
+            playground_id,
+            playground_default_agent,
+            playground_load_env,
+        )?;
         let agents = agents
             .iter()
             .map(|(id, command)| ((*id).to_string(), command.clone()))
@@ -443,9 +458,11 @@ mod tests {
         Ok(AppConfig {
             paths: ConfigPaths::from_root_dir(source_dir.join("config-root")),
             agents,
-            default_agent: default_agent.to_string(),
-            load_env: false,
             saved_playgrounds_dir: save_root.to_path_buf(),
+            playground_defaults: PlaygroundConfig {
+                default_agent: default_agent.map(str::to_string),
+                load_env: Some(false),
+            },
             playgrounds,
         })
     }
@@ -467,9 +484,9 @@ mod tests {
         let playground = PlaygroundDefinition {
             id: "demo".to_string(),
             description: "demo".to_string(),
-            default_agent: None,
             directory: source_dir.path().to_path_buf(),
             config_file: config_file.clone(),
+            playground: PlaygroundConfig::default(),
         };
 
         copy_playground_contents(&playground, false, destination_dir.path())?;
@@ -501,9 +518,9 @@ mod tests {
         let playground = PlaygroundDefinition {
             id: "demo".to_string(),
             description: "demo".to_string(),
-            default_agent: None,
             directory: source_dir.path().to_path_buf(),
             config_file,
+            playground: PlaygroundConfig::default(),
         };
 
         copy_playground_contents(&playground, true, destination_dir.path())?;
@@ -613,7 +630,8 @@ mod tests {
             source_dir.path(),
             save_root.path(),
             "demo",
-            "claude",
+            Some("claude"),
+            None,
             None,
             &[("claude", command_writing_marker("default"))],
         )?;
@@ -633,7 +651,8 @@ mod tests {
             source_dir.path(),
             save_root.path(),
             "demo",
-            "claude",
+            Some("claude"),
+            None,
             None,
             &[("claude", command_writing_marker("default"))],
         )?;
@@ -653,7 +672,8 @@ mod tests {
             source_dir.path(),
             save_root.path(),
             "demo",
-            "claude",
+            Some("claude"),
+            None,
             None,
             &[("claude", command_writing_marker("default"))],
         )?;
@@ -672,6 +692,65 @@ mod tests {
     }
 
     #[test]
+    fn runs_empty_default_playground_with_default_agent() -> Result<()> {
+        let source_dir = tempdir()?;
+        let save_root = tempdir()?;
+        let config = make_config(
+            source_dir.path(),
+            save_root.path(),
+            "demo",
+            Some("claude"),
+            None,
+            None,
+            &[("claude", command_writing_marker("default"))],
+        )?;
+
+        let exit_code = run_default_playground(&config, None, true)?;
+        let snapshot = single_saved_snapshot(save_root.path())?;
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(
+            fs::read_to_string(snapshot.join("agent.txt"))?.trim(),
+            "default"
+        );
+        assert!(!snapshot.join("notes.txt").exists());
+        assert!(
+            snapshot
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with("__default__-"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn selected_agent_overrides_default_in_empty_default_playground() -> Result<()> {
+        let source_dir = tempdir()?;
+        let save_root = tempdir()?;
+        let config = make_config(
+            source_dir.path(),
+            save_root.path(),
+            "demo",
+            Some("claude"),
+            None,
+            None,
+            &[
+                ("claude", command_writing_marker("default")),
+                ("codex", command_writing_marker("selected")),
+            ],
+        )?;
+
+        let exit_code = run_default_playground(&config, Some("codex"), true)?;
+        let snapshot = single_saved_snapshot(save_root.path())?;
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(
+            fs::read_to_string(snapshot.join("agent.txt"))?.trim(),
+            "selected"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn uses_playground_default_agent_before_root_default() -> Result<()> {
         let source_dir = tempdir()?;
         let save_root = tempdir()?;
@@ -679,8 +758,9 @@ mod tests {
             source_dir.path(),
             save_root.path(),
             "demo",
-            "claude",
+            Some("claude"),
             Some("codex"),
+            None,
             &[
                 ("claude", command_writing_marker("root-default")),
                 ("codex", command_writing_marker("playground-default")),
@@ -706,8 +786,9 @@ mod tests {
             source_dir.path(),
             save_root.path(),
             "demo",
-            "claude",
+            Some("claude"),
             Some("opencode"),
+            None,
             &[
                 ("claude", command_writing_marker("default")),
                 ("opencode", command_writing_marker("playground-default")),
@@ -727,65 +808,6 @@ mod tests {
     }
 
     #[test]
-    fn default_playground_uses_root_default_agent_and_saves_snapshot() -> Result<()> {
-        let source_dir = tempdir()?;
-        let save_root = tempdir()?;
-        let config = make_config(
-            source_dir.path(),
-            save_root.path(),
-            "demo",
-            "claude",
-            None,
-            &[("claude", command_writing_marker("default"))],
-        )?;
-
-        let exit_code = run_default_playground(&config, None, true)?;
-        let snapshot = single_saved_snapshot(save_root.path())?;
-
-        assert_eq!(exit_code, 0);
-        assert_eq!(
-            fs::read_to_string(snapshot.join("agent.txt"))?.trim(),
-            "default"
-        );
-        assert!(
-            snapshot
-                .file_name()
-                .expect("snapshot dir name")
-                .to_string_lossy()
-                .starts_with("__default__-")
-        );
-        assert!(!snapshot.join("notes.txt").exists());
-        Ok(())
-    }
-
-    #[test]
-    fn default_playground_allows_selecting_agent_explicitly() -> Result<()> {
-        let source_dir = tempdir()?;
-        let save_root = tempdir()?;
-        let config = make_config(
-            source_dir.path(),
-            save_root.path(),
-            "demo",
-            "claude",
-            None,
-            &[
-                ("claude", command_writing_marker("root-default")),
-                ("codex", command_writing_marker("selected")),
-            ],
-        )?;
-
-        let exit_code = run_default_playground(&config, Some("codex"), true)?;
-        let snapshot = single_saved_snapshot(save_root.path())?;
-
-        assert_eq!(exit_code, 0);
-        assert_eq!(
-            fs::read_to_string(snapshot.join("agent.txt"))?.trim(),
-            "selected"
-        );
-        Ok(())
-    }
-
-    #[test]
     fn does_not_save_snapshot_when_disabled() -> Result<()> {
         let source_dir = tempdir()?;
         let save_root = tempdir()?;
@@ -793,7 +815,8 @@ mod tests {
             source_dir.path(),
             save_root.path(),
             "demo",
-            "claude",
+            Some("claude"),
+            None,
             None,
             &[("claude", command_writing_marker("default"))],
         )?;
@@ -813,7 +836,8 @@ mod tests {
             source_dir.path(),
             save_root.path(),
             "demo",
-            "claude",
+            Some("claude"),
+            None,
             None,
             &[("claude", failing_command())],
         )?;
@@ -833,15 +857,15 @@ mod tests {
             source_dir.path().join(".env"),
             "PLAYGROUND_SECRET=token-123\n",
         )?;
-        let mut config = make_config(
+        let config = make_config(
             source_dir.path(),
             save_root.path(),
             "demo",
-            "claude",
+            Some("claude"),
             None,
+            Some(true),
             &[("claude", command_recording_env("PLAYGROUND_SECRET"))],
         )?;
-        config.load_env = true;
 
         let exit_code = run_playground(&config, "demo", None, true)?;
         let snapshot = single_saved_snapshot(save_root.path())?;

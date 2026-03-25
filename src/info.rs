@@ -28,16 +28,21 @@ pub fn show_playground_info(playground_id: &str) -> Result<()> {
 }
 
 fn format_playground_info(config: &AppConfig, playground: &PlaygroundDefinition) -> Result<String> {
-    let (default_agent, default_agent_source) =
-        if let Some(default_agent) = playground.default_agent.as_deref() {
-            (default_agent, "playground")
-        } else {
-            (config.default_agent.as_str(), "root")
-        };
+    let effective_config = config.resolve_playground_config(playground)?;
+    let default_agent_source = if playground.playground.default_agent.is_some() {
+        "playground"
+    } else {
+        "root"
+    };
     let agent_command = config
         .agents
-        .get(default_agent)
-        .with_context(|| format!("default agent '{default_agent}' is not defined in [agent]"))?;
+        .get(&effective_config.default_agent)
+        .with_context(|| {
+            format!(
+                "default agent '{}' is not defined in [agent]",
+                effective_config.default_agent
+            )
+        })?;
     let agent_config_dirs = find_agent_config_dirs(&playground.directory, &config.agents)?;
 
     Ok(format!(
@@ -52,7 +57,7 @@ AGENT_CONFIG_DIRS:  {}\n",
         playground.description,
         playground.directory.display(),
         playground.config_file.display(),
-        default_agent,
+        effective_config.default_agent,
         default_agent_source,
         agent_command,
         if agent_config_dirs.is_empty() {
@@ -123,17 +128,22 @@ mod tests {
         let config = AppConfig {
             paths: ConfigPaths::from_root_dir(temp_dir.path().join("config-root")),
             agents,
-            default_agent: "claude".to_string(),
-            load_env: false,
             saved_playgrounds_dir: temp_dir.path().join("saved-playgrounds"),
+            playground_defaults: crate::config::PlaygroundConfig {
+                default_agent: Some("claude".to_string()),
+                load_env: Some(false),
+            },
             playgrounds: BTreeMap::new(),
         };
         let playground = PlaygroundDefinition {
             id: "demo".to_string(),
             description: "Demo playground".to_string(),
-            default_agent: Some("codex".to_string()),
             directory: playground_dir.clone(),
             config_file,
+            playground: crate::config::PlaygroundConfig {
+                default_agent: Some("codex".to_string()),
+                load_env: None,
+            },
         };
 
         let output = format_playground_info(&config, &playground).expect("format should succeed");
@@ -168,17 +178,19 @@ AGENT_CONFIG_DIRS:  .claude, .codex\n",
         let config = AppConfig {
             paths: ConfigPaths::from_root_dir(temp_dir.path().join("config-root")),
             agents,
-            default_agent: "claude".to_string(),
-            load_env: false,
             saved_playgrounds_dir: temp_dir.path().join("saved-playgrounds"),
+            playground_defaults: crate::config::PlaygroundConfig {
+                default_agent: Some("claude".to_string()),
+                load_env: Some(false),
+            },
             playgrounds: BTreeMap::new(),
         };
         let playground = PlaygroundDefinition {
             id: "demo".to_string(),
             description: "Demo playground".to_string(),
-            default_agent: None,
             directory: playground_dir.clone(),
             config_file,
+            playground: crate::config::PlaygroundConfig::default(),
         };
 
         let output = format_playground_info(&config, &playground).expect("format should succeed");

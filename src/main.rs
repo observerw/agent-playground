@@ -61,22 +61,6 @@ enum Commands {
 }
 
 #[derive(Debug, Args)]
-struct InitArgs {
-    #[arg(
-        value_name = "PLAYGROUND_ID",
-        help = "The playground identifier to initialize"
-    )]
-    playground_id: String,
-    #[arg(
-        long = "agent",
-        value_name = "AGENT_ID",
-        help = "Initialize the template config directory for an agent. Repeat to include multiple agents.",
-        action = ArgAction::Append
-    )]
-    agent_ids: Vec<String>,
-}
-
-#[derive(Debug, Args)]
 struct DefaultArgs {
     #[arg(
         long = "agent",
@@ -91,6 +75,22 @@ struct DefaultArgs {
         action = ArgAction::SetTrue
     )]
     save: bool,
+}
+
+#[derive(Debug, Args)]
+struct InitArgs {
+    #[arg(
+        value_name = "PLAYGROUND_ID",
+        help = "The playground identifier to initialize"
+    )]
+    playground_id: String,
+    #[arg(
+        long = "agent",
+        value_name = "AGENT_ID",
+        help = "Initialize the template config directory for an agent. Repeat to include multiple agents.",
+        action = ArgAction::Append
+    )]
+    agent_ids: Vec<String>,
 }
 
 #[derive(Debug, Args)]
