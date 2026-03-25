@@ -25,6 +25,7 @@ const APP_CONFIG_DIR: &str = "agent-playground";
 const ROOT_CONFIG_FILE_NAME: &str = "config.toml";
 const PLAYGROUND_CONFIG_FILE_NAME: &str = "apg.toml";
 const PLAYGROUNDS_DIR_NAME: &str = "playgrounds";
+const DEFAULT_SUBCOMMAND_PLAYGROUND_ID: &str = "default";
 static TEMPLATE_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/templates");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -300,6 +301,8 @@ where
     GA: Fn() -> Result<bool>,
     GI: Fn(&Path) -> Result<()>,
 {
+    validate_playground_id(playground_id)?;
+
     let root_config_created = ensure_root_initialized(&paths)?;
     let selected_agent_templates = select_agent_templates(agent_ids)?;
 
@@ -392,6 +395,16 @@ fn resolve_playground_dir_at(paths: ConfigPaths, playground_id: &str) -> Result<
 fn validate_playground_id(playground_id: &str) -> Result<()> {
     if playground_id.is_empty() {
         bail!("playground id cannot be empty");
+    }
+    if playground_id == DEFAULT_SUBCOMMAND_PLAYGROUND_ID {
+        bail!(
+            "invalid playground id '{playground_id}': this name is reserved for the `default` subcommand"
+        );
+    }
+    if playground_id.starts_with("__") {
+        bail!(
+            "invalid playground id '{playground_id}': ids starting with '__' are reserved for internal use"
+        );
     }
     if matches!(playground_id, "." | "..")
         || playground_id.contains('/')
@@ -618,6 +631,12 @@ fn load_playgrounds(
 
         let playground_config: PlaygroundConfigFile = read_toml_file(&config_file)?;
         let id = entry.file_name().to_string_lossy().into_owned();
+        validate_playground_id(&id).with_context(|| {
+            format!(
+                "invalid playground directory under {}",
+                playgrounds_dir.display()
+            )
+        })?;
         if let Some(default_agent) = playground_config.default_agent.as_deref()
             && !agents.contains_key(default_agent)
         {
@@ -923,6 +942,40 @@ opencode = "opencode"
     }
 
     #[test]
+    fn init_rejects_reserved_default_playground_id() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let paths = ConfigPaths::from_root_dir(temp_dir.path().to_path_buf());
+
+        let error = init_playground_at(paths, "default", &[]).expect_err("reserved id should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("invalid playground id 'default'")
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("reserved for the `default` subcommand")
+        );
+    }
+
+    #[test]
+    fn init_rejects_internal_reserved_playground_id_prefix() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let paths = ConfigPaths::from_root_dir(temp_dir.path().to_path_buf());
+
+        let error =
+            init_playground_at(paths, "__default__", &[]).expect_err("reserved id should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("ids starting with '__' are reserved for internal use")
+        );
+    }
+
+    #[test]
     fn remove_deletes_existing_playground_directory() {
         let temp_dir = TempDir::new().expect("temp dir");
         let paths = ConfigPaths::from_root_dir(temp_dir.path().to_path_buf());
@@ -1124,6 +1177,30 @@ claude = "claude"
                 .expect_err("invalid playground config should fail");
 
         assert!(error.to_string().contains("failed to parse TOML"));
+    }
+
+    #[test]
+    fn errors_when_playground_directory_uses_reserved_id() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        fs::write(
+            temp_dir.path().join("config.toml"),
+            r#"[agent]
+claude = "claude"
+"#,
+        )
+        .expect("write root config");
+        let playground_dir = temp_dir.path().join("playgrounds").join("default");
+        fs::create_dir_all(&playground_dir).expect("create playground dir");
+        fs::write(playground_dir.join("apg.toml"), "description = 'reserved'")
+            .expect("write playground config");
+
+        let error =
+            AppConfig::load_from_paths(ConfigPaths::from_root_dir(temp_dir.path().to_path_buf()))
+                .expect_err("reserved playground id should fail");
+        let message = format!("{error:#}");
+
+        assert!(message.contains("invalid playground directory under"));
+        assert!(message.contains("invalid playground id 'default'"));
     }
 
     #[test]
