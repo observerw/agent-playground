@@ -144,7 +144,7 @@ pub struct RemoveResult {
     pub paths: ConfigPaths,
     /// The removed playground id.
     pub playground_id: String,
-    /// Absolute path to the removed playground directory.
+    /// Path to the removed playground directory.
     pub playground_dir: PathBuf,
 }
 
@@ -157,7 +157,7 @@ pub struct PlaygroundDefinition {
     pub description: String,
     /// Optional per-playground default agent override.
     pub default_agent: Option<String>,
-    /// Absolute path to the playground directory.
+    /// Path to the playground directory.
     pub directory: PathBuf,
     /// Path to this playground's `apg.toml` file.
     pub config_file: PathBuf,
@@ -300,6 +300,7 @@ where
     GA: Fn() -> Result<bool>,
     GI: Fn(&Path) -> Result<()>,
 {
+    validate_playground_id(playground_id)?;
     let root_config_created = ensure_root_initialized(&paths)?;
     let selected_agent_templates = select_agent_templates(agent_ids)?;
 
@@ -322,7 +323,23 @@ where
     )?;
     copy_agent_templates(&playground_dir, &selected_agent_templates)?;
     if git_is_available()? {
-        init_git_repo(&playground_dir)?;
+        if let Err(error) = init_git_repo(&playground_dir) {
+            match fs::remove_dir_all(&playground_dir) {
+                Ok(()) => {
+                    return Err(error).context(format!(
+                        "failed to initialize git repository in {}; removed partially initialized playground",
+                        playground_dir.display()
+                    ));
+                }
+                Err(cleanup_error) => {
+                    return Err(error).context(format!(
+                        "failed to initialize git repository in {}; additionally failed to remove partially initialized playground {}: {cleanup_error}",
+                        playground_dir.display(),
+                        playground_dir.display()
+                    ));
+                }
+            }
+        }
     }
 
     Ok(InitResult {
@@ -667,7 +684,7 @@ mod tests {
         resolve_playground_dir_at, user_config_base_dir,
     };
     use serde_json::Value;
-    use std::{cell::Cell, fs};
+    use std::{cell::Cell, fs, io};
     use tempfile::TempDir;
 
     #[test]
@@ -1053,6 +1070,45 @@ opencode = "opencode"
                 .join(".git")
                 .exists()
         );
+    }
+
+    #[test]
+    fn init_rejects_path_traversal_ids_before_writing_files() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let paths = ConfigPaths::from_root_dir(temp_dir.path().to_path_buf());
+
+        let error = init_playground_at(paths, "../demo", &[])
+            .expect_err("path traversal playground id should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("invalid playground id '../demo'")
+        );
+        assert!(!temp_dir.path().join("config.toml").exists());
+        assert!(!temp_dir.path().join("playgrounds").exists());
+        assert!(!temp_dir.path().join("playgrounds").join("demo").exists());
+    }
+
+    #[test]
+    fn init_cleans_up_playground_directory_when_git_init_fails() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let paths = ConfigPaths::from_root_dir(temp_dir.path().to_path_buf());
+
+        let error = init_playground_at_with_git(
+            paths,
+            "demo",
+            &[],
+            || Ok(true),
+            |_| Err(io::Error::other("git init failed").into()),
+        )
+        .expect_err("git init failure should fail init");
+
+        let error_message = format!("{error:#}");
+
+        assert!(error_message.contains("git init failed"));
+        assert!(error_message.contains("removed partially initialized playground"));
+        assert!(!temp_dir.path().join("playgrounds").join("demo").exists());
     }
 
     #[test]
