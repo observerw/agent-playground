@@ -323,22 +323,22 @@ where
         &PlaygroundConfigFile::for_playground(playground_id),
     )?;
     copy_agent_templates(&playground_dir, &selected_agent_templates)?;
-    if git_is_available()? {
-        if let Err(error) = init_git_repo(&playground_dir) {
-            match fs::remove_dir_all(&playground_dir) {
-                Ok(()) => {
-                    return Err(error).context(format!(
-                        "failed to initialize git repository in {}; removed partially initialized playground",
-                        playground_dir.display()
-                    ));
-                }
-                Err(cleanup_error) => {
-                    return Err(error).context(format!(
-                        "failed to initialize git repository in {}; additionally failed to remove partially initialized playground {}: {cleanup_error}",
-                        playground_dir.display(),
-                        playground_dir.display()
-                    ));
-                }
+    if git_is_available()?
+        && let Err(error) = init_git_repo(&playground_dir)
+    {
+        match fs::remove_dir_all(&playground_dir) {
+            Ok(()) => {
+                return Err(error).context(format!(
+                    "failed to initialize git repository in {}; removed partially initialized playground",
+                    playground_dir.display()
+                ));
+            }
+            Err(cleanup_error) => {
+                return Err(error).context(format!(
+                    "failed to initialize git repository in {}; additionally failed to remove partially initialized playground {}: {cleanup_error}",
+                    playground_dir.display(),
+                    playground_dir.display()
+                ));
             }
         }
     }
