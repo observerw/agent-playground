@@ -25,6 +25,7 @@ const APP_CONFIG_DIR: &str = "agent-playground";
 const ROOT_CONFIG_FILE_NAME: &str = "config.toml";
 const PLAYGROUND_CONFIG_FILE_NAME: &str = "apg.toml";
 const PLAYGROUNDS_DIR_NAME: &str = "playgrounds";
+const DEFAULT_SAVED_PLAYGROUNDS_DIR_NAME: &str = "saved-playgrounds";
 static TEMPLATE_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/templates");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,12 +76,10 @@ pub struct AppConfig {
     pub paths: ConfigPaths,
     /// Agent identifier to shell command mapping from `[agent]`.
     pub agents: BTreeMap<String, String>,
-    /// Fallback agent id used when no more specific selection exists.
-    pub default_agent: String,
-    /// Whether `.env` should be loaded from a playground before agent launch.
-    pub load_env: bool,
     /// Destination directory where saved snapshot copies are written.
     pub saved_playgrounds_dir: PathBuf,
+    /// Default playground runtime config inherited by all playgrounds.
+    pub playground_defaults: PlaygroundConfig,
     /// All discovered playground definitions keyed by playground id.
     pub playgrounds: BTreeMap<String, PlaygroundDefinition>,
 }
@@ -98,27 +97,38 @@ impl AppConfig {
         ensure_root_initialized(&paths)?;
         let resolved_root_config = load_root_config(&paths)?;
         let agents = resolved_root_config.agents;
-        let default_agent = resolved_root_config.default_agent;
-        let load_env = resolved_root_config.load_env;
         let saved_playgrounds_dir = resolve_saved_playgrounds_dir(
             &paths.root_dir,
             resolved_root_config.saved_playgrounds_dir,
         );
+        let playground_defaults = resolved_root_config.playground_defaults;
 
-        if !agents.contains_key(&default_agent) {
-            bail!("default agent '{default_agent}' is not defined in [agent]");
-        }
+        validate_default_agent_defined(
+            &agents,
+            playground_defaults.default_agent.as_deref(),
+            "default agent",
+        )?;
 
-        let playgrounds = load_playgrounds(&paths.playgrounds_dir, &agents)?;
+        let playgrounds = load_playgrounds(&paths.playgrounds_dir, &agents, &playground_defaults)?;
 
         Ok(Self {
             paths,
             agents,
-            default_agent,
-            load_env,
             saved_playgrounds_dir,
+            playground_defaults,
             playgrounds,
         })
+    }
+
+    /// Returns the effective runtime config for a playground after applying
+    /// root-level playground defaults.
+    pub(crate) fn resolve_playground_config(
+        &self,
+        playground: &PlaygroundDefinition,
+    ) -> Result<ResolvedPlaygroundConfig> {
+        playground
+            .playground
+            .resolve_over(&self.playground_defaults)
     }
 }
 
@@ -155,12 +165,23 @@ pub struct PlaygroundDefinition {
     pub id: String,
     /// Human-readable description from `apg.toml`.
     pub description: String,
-    /// Optional per-playground default agent override.
-    pub default_agent: Option<String>,
     /// Absolute path to the playground directory.
     pub directory: PathBuf,
     /// Path to this playground's `apg.toml` file.
     pub config_file: PathBuf,
+    /// Per-playground runtime config overrides loaded from `apg.toml`.
+    pub playground: PlaygroundConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+/// Shared playground-scoped config fields used by root defaults and per-playground overrides.
+pub struct PlaygroundConfig {
+    /// Optional default agent id override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_agent: Option<String>,
+    /// Optional flag controlling `.env` loading in playground runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load_env: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
@@ -169,19 +190,27 @@ pub struct RootConfigFile {
     /// Agent id to command mapping under `[agent]`.
     #[serde(default)]
     pub agent: BTreeMap<String, String>,
-    /// Optional default agent id override.
-    ///
-    /// If omitted, the built-in default is used.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default_agent: Option<String>,
-    /// Optional flag controlling `.env` loading in playground runs.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub load_env: Option<bool>,
     /// Optional directory for persisted playground snapshots.
     ///
     /// Relative paths are resolved against [`ConfigPaths::root_dir`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub saved_playgrounds_dir: Option<PathBuf>,
+    /// Optional defaults inherited by all playgrounds.
+    #[serde(default, skip_serializing_if = "PlaygroundConfig::is_empty")]
+    pub playground: PlaygroundConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedRootConfig {
+    agents: BTreeMap<String, String>,
+    saved_playgrounds_dir: PathBuf,
+    playground_defaults: PlaygroundConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedPlaygroundConfig {
+    pub(crate) default_agent: String,
+    pub(crate) load_env: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -189,17 +218,43 @@ pub struct RootConfigFile {
 pub struct PlaygroundConfigFile {
     /// Human-readable description shown in listing output.
     pub description: String,
-    /// Optional playground-local default agent id.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default_agent: Option<String>,
+    /// Optional playground-local runtime overrides.
+    #[serde(flatten)]
+    pub playground: PlaygroundConfig,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ResolvedRootConfig {
-    agents: BTreeMap<String, String>,
-    default_agent: String,
-    load_env: bool,
-    saved_playgrounds_dir: PathBuf,
+impl PlaygroundConfig {
+    fn builtin_defaults() -> Self {
+        Self {
+            default_agent: Some("claude".to_string()),
+            load_env: Some(false),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.default_agent.is_none() && self.load_env.is_none()
+    }
+
+    fn merged_over(&self, base: &Self) -> Self {
+        Self {
+            default_agent: self
+                .default_agent
+                .clone()
+                .or_else(|| base.default_agent.clone()),
+            load_env: self.load_env.or(base.load_env),
+        }
+    }
+
+    fn resolve_over(&self, base: &Self) -> Result<ResolvedPlaygroundConfig> {
+        let merged = self.merged_over(base);
+
+        Ok(ResolvedPlaygroundConfig {
+            default_agent: merged
+                .default_agent
+                .context("default playground config is missing default_agent")?,
+            load_env: merged.load_env.unwrap_or(false),
+        })
+    }
 }
 
 impl RootConfigFile {
@@ -215,9 +270,8 @@ impl RootConfigFile {
 
         Self {
             agent,
-            default_agent: Some("claude".to_string()),
-            load_env: Some(false),
             saved_playgrounds_dir: Some(default_saved_playgrounds_dir(paths)),
+            playground: PlaygroundConfig::builtin_defaults(),
         }
     }
 
@@ -226,24 +280,16 @@ impl RootConfigFile {
         let mut agents = defaults.agent;
         agents.extend(self.agent);
 
-        let default_agent = self
-            .default_agent
-            .or(defaults.default_agent)
-            .context("default root config is missing default_agent")?;
-        let load_env = self
-            .load_env
-            .or(defaults.load_env)
-            .context("default root config is missing load_env")?;
         let saved_playgrounds_dir = self
             .saved_playgrounds_dir
             .or(defaults.saved_playgrounds_dir)
             .context("default root config is missing saved_playgrounds_dir")?;
+        let playground_defaults = self.playground.merged_over(&defaults.playground);
 
         Ok(ResolvedRootConfig {
             agents,
-            default_agent,
-            load_env,
             saved_playgrounds_dir,
+            playground_defaults,
         })
     }
 }
@@ -257,7 +303,7 @@ impl PlaygroundConfigFile {
     fn for_playground(playground_id: &str) -> Self {
         Self {
             description: format!("TODO: describe {playground_id}"),
-            default_agent: None,
+            playground: PlaygroundConfig::default(),
         }
     }
 }
@@ -559,8 +605,8 @@ fn load_root_config(paths: &ConfigPaths) -> Result<ResolvedRootConfig> {
     read_toml_file::<RootConfigFile>(&paths.config_file)?.resolve(paths)
 }
 
-fn default_saved_playgrounds_dir(paths: &ConfigPaths) -> PathBuf {
-    paths.root_dir.join("saved-playgrounds")
+fn default_saved_playgrounds_dir(_paths: &ConfigPaths) -> PathBuf {
+    PathBuf::from(DEFAULT_SAVED_PLAYGROUNDS_DIR_NAME)
 }
 
 fn resolve_saved_playgrounds_dir(root_dir: &Path, configured_path: PathBuf) -> PathBuf {
@@ -571,9 +617,26 @@ fn resolve_saved_playgrounds_dir(root_dir: &Path, configured_path: PathBuf) -> P
     root_dir.join(configured_path)
 }
 
+fn validate_default_agent_defined(
+    agents: &BTreeMap<String, String>,
+    default_agent: Option<&str>,
+    label: &str,
+) -> Result<()> {
+    let Some(default_agent) = default_agent else {
+        bail!("{label} is missing");
+    };
+
+    if !agents.contains_key(default_agent) {
+        bail!("{label} '{default_agent}' is not defined in [agent]");
+    }
+
+    Ok(())
+}
+
 fn load_playgrounds(
     playgrounds_dir: &Path,
     agents: &BTreeMap<String, String>,
+    playground_defaults: &PlaygroundConfig,
 ) -> Result<BTreeMap<String, PlaygroundDefinition>> {
     if !playgrounds_dir.exists() {
         return Ok(BTreeMap::new());
@@ -618,20 +681,23 @@ fn load_playgrounds(
 
         let playground_config: PlaygroundConfigFile = read_toml_file(&config_file)?;
         let id = entry.file_name().to_string_lossy().into_owned();
-        if let Some(default_agent) = playground_config.default_agent.as_deref()
-            && !agents.contains_key(default_agent)
-        {
-            bail!("playground '{id}' default agent '{default_agent}' is not defined in [agent]");
-        }
+        let effective_config = playground_config
+            .playground
+            .merged_over(playground_defaults);
+        validate_default_agent_defined(
+            agents,
+            effective_config.default_agent.as_deref(),
+            &format!("playground '{id}' default agent"),
+        )?;
 
         playgrounds.insert(
             id.clone(),
             PlaygroundDefinition {
                 id,
                 description: playground_config.description,
-                default_agent: playground_config.default_agent,
                 directory,
                 config_file,
+                playground: playground_config.playground,
             },
         );
     }
@@ -717,8 +783,11 @@ mod tests {
         let config = AppConfig::load_from_paths(paths).expect("config should load");
         assert_eq!(config.agents.get("claude"), Some(&"claude".to_string()));
         assert_eq!(config.agents.get("opencode"), Some(&"opencode".to_string()));
-        assert_eq!(config.default_agent, "claude");
-        assert!(!config.load_env);
+        assert_eq!(
+            config.playground_defaults.default_agent.as_deref(),
+            Some("claude")
+        );
+        assert_eq!(config.playground_defaults.load_env, Some(false));
         assert_eq!(
             config.saved_playgrounds_dir,
             temp_dir.path().join("saved-playgrounds")
@@ -731,13 +800,13 @@ mod tests {
                 .description,
             "TODO: describe demo"
         );
-        assert_eq!(
+        assert!(
             config
                 .playgrounds
                 .get("demo")
                 .expect("demo playground")
-                .default_agent,
-            None
+                .playground
+                .is_empty()
         );
     }
 
@@ -747,13 +816,15 @@ mod tests {
         let root = temp_dir.path();
         fs::write(
             root.join("config.toml"),
-            r#"default_agent = "codex"
-load_env = true
-saved_playgrounds_dir = "archives"
+            r#"saved_playgrounds_dir = "archives"
 
 [agent]
 claude = "custom-claude"
 codex = "codex --fast"
+
+[playground]
+default_agent = "codex"
+load_env = true
 "#,
         )
         .expect("write root config");
@@ -779,14 +850,25 @@ default_agent = "claude""#,
             config.agents.get("codex"),
             Some(&"codex --fast".to_string())
         );
-        assert_eq!(config.default_agent, "codex");
-        assert!(config.load_env);
+        assert_eq!(
+            config.playground_defaults.default_agent.as_deref(),
+            Some("codex")
+        );
+        assert_eq!(config.playground_defaults.load_env, Some(true));
         assert_eq!(config.saved_playgrounds_dir, root.join("archives"));
 
         let playground = config.playgrounds.get("demo").expect("demo playground");
         assert_eq!(playground.description, "Demo playground");
-        assert_eq!(playground.default_agent.as_deref(), Some("claude"));
+        assert_eq!(
+            playground.playground.default_agent.as_deref(),
+            Some("claude")
+        );
         assert_eq!(playground.directory, playground_dir);
+        let effective_config = config
+            .resolve_playground_config(playground)
+            .expect("effective playground config");
+        assert_eq!(effective_config.default_agent, "claude");
+        assert!(effective_config.load_env);
     }
 
     #[test]
@@ -829,8 +911,11 @@ default_agent = "codex""#,
         assert!(temp_dir.path().join("config.toml").is_file());
         assert!(temp_dir.path().join("playgrounds").is_dir());
         assert_eq!(config.agents.get("claude"), Some(&"claude".to_string()));
-        assert_eq!(config.default_agent, "claude");
-        assert!(!config.load_env);
+        assert_eq!(
+            config.playground_defaults.default_agent.as_deref(),
+            Some("claude")
+        );
+        assert_eq!(config.playground_defaults.load_env, Some(false));
         assert_eq!(
             config.saved_playgrounds_dir,
             temp_dir.path().join("saved-playgrounds")
@@ -892,7 +977,8 @@ opencode = "opencode"
         let temp_dir = TempDir::new().expect("temp dir");
         fs::write(
             temp_dir.path().join("config.toml"),
-            r#"default_agent = "codex""#,
+            r#"[playground]
+default_agent = "codex""#,
         )
         .expect("write root config");
 
@@ -1094,8 +1180,11 @@ opencode = "opencode"
     #[test]
     fn errors_when_root_config_toml_is_invalid() {
         let temp_dir = TempDir::new().expect("temp dir");
-        fs::write(temp_dir.path().join("config.toml"), "default_agent = ")
-            .expect("write invalid root config");
+        fs::write(
+            temp_dir.path().join("config.toml"),
+            "[playground]\ndefault_agent = ",
+        )
+        .expect("write invalid root config");
 
         let error =
             AppConfig::load_from_paths(ConfigPaths::from_root_dir(temp_dir.path().to_path_buf()))
@@ -1162,9 +1251,8 @@ claude = "claude"
 
         assert_eq!(schema["type"], Value::String("object".to_string()));
         assert!(schema["properties"]["agent"].is_object());
-        assert!(schema["properties"]["default_agent"].is_object());
-        assert!(schema["properties"]["load_env"].is_object());
         assert!(schema["properties"]["saved_playgrounds_dir"].is_object());
+        assert!(schema["properties"]["playground"].is_object());
     }
 
     #[test]
@@ -1175,6 +1263,7 @@ claude = "claude"
         assert_eq!(schema["type"], Value::String("object".to_string()));
         assert!(schema["properties"]["description"].is_object());
         assert!(schema["properties"]["default_agent"].is_object());
+        assert!(schema["properties"]["load_env"].is_object());
         assert_eq!(
             schema["required"],
             Value::Array(vec![Value::String("description".to_string())])

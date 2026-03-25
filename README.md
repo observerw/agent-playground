@@ -56,6 +56,7 @@ curl https://github.com/observerw/agent-playground/releases/latest/download/inst
 ```bash
 # initialize a playground in ~/.config/agent-playground/playgrounds
 # choose a proper name for your playground, e.g. "notion" for notion MCP agent
+# when git is available, this also initializes a git repository in the new playground
 apg init demo
 # you can also initialize a playground and include specific agent config templates
 apg init demo --agent claude --agent codex
@@ -76,27 +77,33 @@ When the agent exits, `apg` asks whether to keep the temporary playground copy. 
 
 The CLI stores configuration under `~/.config/agent-playground`.
 
-`config.toml` defines the known agents and default selection:
+`config.toml` defines global settings, known agents, and the default runtime
+behavior inherited by playgrounds:
 
 ```toml
-default_agent = "claude"
-# whether to load each playground template's `.env` into the agent process environment
-# (the `.env` file itself is not copied into the temp/saved playground when enabled)
-load_env = false
-saved_playgrounds_dir = "~/Download/saved-playgrounds"
+saved_playgrounds_dir = "saved-playgrounds"
 
 [agent]
 claude = "claude"
 opencode = "opencode"
 # or you can specify a custom command:
 # opencode = "docker run --rm -it opencode/agent:latest"
+
+[playground]
+default_agent = "claude"
+# whether to load each playground template's `.env` into the agent process environment
+# (the `.env` file itself is not copied into the temp/saved playground when enabled)
+load_env = false
 ```
 
-Each playground gets its own `apg.toml`:
+Each playground gets its own flat `apg.toml`, which can override the inherited
+playground defaults:
 
 ```toml
 # description of the playground, shown in `apg list` output.
 description = "TODO: describe demo"
+default_agent = "codex"
+load_env = true
 ```
 
 ## License

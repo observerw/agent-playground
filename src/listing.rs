@@ -60,7 +60,7 @@ fn format_playgrounds(playgrounds: &BTreeMap<String, PlaygroundDefinition>) -> S
 mod tests {
     use std::{collections::BTreeMap, path::PathBuf};
 
-    use crate::config::PlaygroundDefinition;
+    use crate::config::{PlaygroundConfig, PlaygroundDefinition};
 
     use super::format_playgrounds;
 
@@ -72,9 +72,9 @@ mod tests {
             PlaygroundDefinition {
                 id: "demo".to_string(),
                 description: "Demo playground".to_string(),
-                default_agent: None,
                 directory: PathBuf::from("/tmp/demo"),
                 config_file: PathBuf::from("/tmp/demo/apg.toml"),
+                playground: PlaygroundConfig::default(),
             },
         );
         playgrounds.insert(
@@ -82,9 +82,9 @@ mod tests {
             PlaygroundDefinition {
                 id: "longer-id".to_string(),
                 description: "Longer playground".to_string(),
-                default_agent: None,
                 directory: PathBuf::from("/tmp/longer-id"),
                 config_file: PathBuf::from("/tmp/longer-id/apg.toml"),
+                playground: PlaygroundConfig::default(),
             },
         );
 
