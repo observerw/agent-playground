@@ -411,12 +411,10 @@ fn load_playgrounds(
 
         let playground_config: PlaygroundConfigFile = read_toml_file(&config_file)?;
         let id = entry.file_name().to_string_lossy().into_owned();
-        if let Some(default_agent) = playground_config.default_agent.as_deref() {
-            if !agents.contains_key(default_agent) {
-                bail!(
-                    "playground '{id}' default agent '{default_agent}' is not defined in [agent]"
-                );
-            }
+        if let Some(default_agent) = playground_config.default_agent.as_deref()
+            && !agents.contains_key(default_agent)
+        {
+            bail!("playground '{id}' default agent '{default_agent}' is not defined in [agent]");
         }
 
         playgrounds.insert(
