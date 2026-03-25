@@ -6,6 +6,7 @@ use std::{
 
 use agent_playground::{
     config::{AppConfig, init_playground, remove_playground, resolve_playground_dir},
+    info::show_playground_info,
     listing::list_playgrounds,
     runner::run_playground,
 };
@@ -49,6 +50,8 @@ struct Cli {
 enum Commands {
     /// Initialize config for a playground
     Init(InitArgs),
+    /// Show detailed information for a playground
+    Info(InfoArgs),
     /// List all playgrounds
     List,
     /// Remove a playground from the global config directory
@@ -69,6 +72,15 @@ struct InitArgs {
         action = ArgAction::Append
     )]
     agent_ids: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+struct InfoArgs {
+    #[arg(
+        value_name = "PLAYGROUND_ID",
+        help = "The playground identifier to inspect"
+    )]
+    playground_id: String,
 }
 
 #[derive(Debug, Args)]
@@ -181,6 +193,7 @@ fn main() -> Result<()> {
 
     match cli.command {
         Some(Commands::Init(args)) => handle_init(args),
+        Some(Commands::Info(args)) => show_playground_info(&args.playground_id),
         Some(Commands::List) => {
             list_playgrounds()?;
             Ok(())
@@ -256,6 +269,21 @@ mod tests {
 
         assert!(matches.subcommand_matches("list").is_some());
         assert!(matches.get_one::<String>("playground_id").is_none());
+    }
+
+    #[test]
+    fn info_subcommand_parses_playground_id() {
+        let matches = build_cli()
+            .try_get_matches_from(["apg", "info", "demo"])
+            .expect("cli should parse");
+
+        let Some(("info", info_matches)) = matches.subcommand() else {
+            panic!("info subcommand")
+        };
+        assert_eq!(
+            info_matches.get_one::<String>("playground_id"),
+            Some(&"demo".to_string())
+        );
     }
 
     #[test]
