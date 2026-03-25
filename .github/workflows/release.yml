@@ -18,7 +18,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Create release
-        uses: softprops/action-gh-release@v2
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            echo "Release ${GITHUB_REF_NAME} already exists"
+          else
+            gh release create "${GITHUB_REF_NAME}" --verify-tag --title "${GITHUB_REF_NAME}"
+          fi
 
   publish-crate:
     name: Publish crate
@@ -27,7 +35,7 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -66,7 +74,7 @@ jobs:
             target: x86_64-apple-darwin
             archive: tar.gz
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -99,17 +107,20 @@ jobs:
           tar -czf "dist/${BINARY_NAME}-${{ matrix.target }}.tar.gz" -C dist "${BINARY_NAME}"
 
       - name: Upload release asset
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            dist/${{ env.BINARY_NAME }}-${{ matrix.target }}.${{ matrix.archive }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          gh release upload "${GITHUB_REF_NAME}" \
+            "dist/${BINARY_NAME}-${{ matrix.target }}.${{ matrix.archive }}" \
+            --clobber
 
   publish-installer:
     name: Publish installer
     needs: create-release
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Render installer script
         shell: bash
@@ -119,6 +130,7 @@ jobs:
           chmod +x dist/install.sh
 
       - name: Upload installer
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/install.sh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: gh release upload "${GITHUB_REF_NAME}" dist/install.sh --clobber
