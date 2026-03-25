@@ -25,6 +25,7 @@ const APP_CONFIG_DIR: &str = "agent-playground";
 const ROOT_CONFIG_FILE_NAME: &str = "config.toml";
 const PLAYGROUND_CONFIG_FILE_NAME: &str = "apg.toml";
 const PLAYGROUNDS_DIR_NAME: &str = "playgrounds";
+const DEFAULT_SUBCOMMAND_PLAYGROUND_ID: &str = "default";
 const DEFAULT_SAVED_PLAYGROUNDS_DIR_NAME: &str = "saved-playgrounds";
 static TEMPLATE_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/templates");
 
@@ -154,7 +155,7 @@ pub struct RemoveResult {
     pub paths: ConfigPaths,
     /// The removed playground id.
     pub playground_id: String,
-    /// Absolute path to the removed playground directory.
+    /// Path to the removed playground directory.
     pub playground_dir: PathBuf,
 }
 
@@ -165,7 +166,7 @@ pub struct PlaygroundDefinition {
     pub id: String,
     /// Human-readable description from `apg.toml`.
     pub description: String,
-    /// Absolute path to the playground directory.
+    /// Path to the playground directory.
     pub directory: PathBuf,
     /// Path to this playground's `apg.toml` file.
     pub config_file: PathBuf,
@@ -346,6 +347,7 @@ where
     GA: Fn() -> Result<bool>,
     GI: Fn(&Path) -> Result<()>,
 {
+    validate_playground_id(playground_id)?;
     let root_config_created = ensure_root_initialized(&paths)?;
     let selected_agent_templates = select_agent_templates(agent_ids)?;
 
@@ -367,8 +369,24 @@ where
         &PlaygroundConfigFile::for_playground(playground_id),
     )?;
     copy_agent_templates(&playground_dir, &selected_agent_templates)?;
-    if git_is_available()? {
-        init_git_repo(&playground_dir)?;
+    if git_is_available()?
+        && let Err(error) = init_git_repo(&playground_dir)
+    {
+        match fs::remove_dir_all(&playground_dir) {
+            Ok(()) => {
+                return Err(error).context(format!(
+                    "failed to initialize git repository in {}; removed partially initialized playground",
+                    playground_dir.display()
+                ));
+            }
+            Err(cleanup_error) => {
+                return Err(error).context(format!(
+                    "failed to initialize git repository in {}; additionally failed to remove partially initialized playground {}: {cleanup_error}",
+                    playground_dir.display(),
+                    playground_dir.display()
+                ));
+            }
+        }
     }
 
     Ok(InitResult {
@@ -438,6 +456,16 @@ fn resolve_playground_dir_at(paths: ConfigPaths, playground_id: &str) -> Result<
 fn validate_playground_id(playground_id: &str) -> Result<()> {
     if playground_id.is_empty() {
         bail!("playground id cannot be empty");
+    }
+    if playground_id == DEFAULT_SUBCOMMAND_PLAYGROUND_ID {
+        bail!(
+            "invalid playground id '{playground_id}': this name is reserved for the `default` subcommand"
+        );
+    }
+    if playground_id.starts_with("__") {
+        bail!(
+            "invalid playground id '{playground_id}': ids starting with '__' are reserved for internal use"
+        );
     }
     if matches!(playground_id, "." | "..")
         || playground_id.contains('/')
@@ -681,6 +709,12 @@ fn load_playgrounds(
 
         let playground_config: PlaygroundConfigFile = read_toml_file(&config_file)?;
         let id = entry.file_name().to_string_lossy().into_owned();
+        validate_playground_id(&id).with_context(|| {
+            format!(
+                "invalid playground directory under {}",
+                playgrounds_dir.display()
+            )
+        })?;
         let effective_config = playground_config
             .playground
             .merged_over(playground_defaults);
@@ -733,7 +767,7 @@ mod tests {
         resolve_playground_dir_at, user_config_base_dir,
     };
     use serde_json::Value;
-    use std::{cell::Cell, fs};
+    use std::{cell::Cell, fs, io};
     use tempfile::TempDir;
 
     #[test]
@@ -1009,6 +1043,40 @@ default_agent = "codex""#,
     }
 
     #[test]
+    fn init_rejects_reserved_default_playground_id() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let paths = ConfigPaths::from_root_dir(temp_dir.path().to_path_buf());
+
+        let error = init_playground_at(paths, "default", &[]).expect_err("reserved id should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("invalid playground id 'default'")
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("reserved for the `default` subcommand")
+        );
+    }
+
+    #[test]
+    fn init_rejects_internal_reserved_playground_id_prefix() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let paths = ConfigPaths::from_root_dir(temp_dir.path().to_path_buf());
+
+        let error =
+            init_playground_at(paths, "__default__", &[]).expect_err("reserved id should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("ids starting with '__' are reserved for internal use")
+        );
+    }
+
+    #[test]
     fn remove_deletes_existing_playground_directory() {
         let temp_dir = TempDir::new().expect("temp dir");
         let paths = ConfigPaths::from_root_dir(temp_dir.path().to_path_buf());
@@ -1056,6 +1124,45 @@ default_agent = "codex""#,
                 .to_string()
                 .contains("invalid playground id '../demo'")
         );
+    }
+
+    #[test]
+    fn init_rejects_path_traversal_ids_before_writing_files() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let paths = ConfigPaths::from_root_dir(temp_dir.path().to_path_buf());
+
+        let error = init_playground_at(paths, "../demo", &[])
+            .expect_err("path traversal playground id should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("invalid playground id '../demo'")
+        );
+        assert!(!temp_dir.path().join("config.toml").exists());
+        assert!(!temp_dir.path().join("playgrounds").exists());
+        assert!(!temp_dir.path().join("playgrounds").join("demo").exists());
+    }
+
+    #[test]
+    fn init_cleans_up_playground_directory_when_git_init_fails() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let paths = ConfigPaths::from_root_dir(temp_dir.path().to_path_buf());
+
+        let error = init_playground_at_with_git(
+            paths,
+            "demo",
+            &[],
+            || Ok(true),
+            |_| Err(io::Error::other("git init failed").into()),
+        )
+        .expect_err("git init failure should fail init");
+
+        let error_message = format!("{error:#}");
+
+        assert!(error_message.contains("git init failed"));
+        assert!(error_message.contains("removed partially initialized playground"));
+        assert!(!temp_dir.path().join("playgrounds").join("demo").exists());
     }
 
     #[test]
@@ -1213,6 +1320,30 @@ claude = "claude"
                 .expect_err("invalid playground config should fail");
 
         assert!(error.to_string().contains("failed to parse TOML"));
+    }
+
+    #[test]
+    fn errors_when_playground_directory_uses_reserved_id() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        fs::write(
+            temp_dir.path().join("config.toml"),
+            r#"[agent]
+claude = "claude"
+"#,
+        )
+        .expect("write root config");
+        let playground_dir = temp_dir.path().join("playgrounds").join("default");
+        fs::create_dir_all(&playground_dir).expect("create playground dir");
+        fs::write(playground_dir.join("apg.toml"), "description = 'reserved'")
+            .expect("write playground config");
+
+        let error =
+            AppConfig::load_from_paths(ConfigPaths::from_root_dir(temp_dir.path().to_path_buf()))
+                .expect_err("reserved playground id should fail");
+        let message = format!("{error:#}");
+
+        assert!(message.contains("invalid playground directory under"));
+        assert!(message.contains("invalid playground id 'default'"));
     }
 
     #[test]
