@@ -8,6 +8,7 @@
 //! # Module Guide
 //!
 //! - [`config`]: file-backed configuration models and initialization helpers.
+//! - [`info`]: terminal-friendly detailed output for one configured playground.
 //! - [`listing`]: terminal-friendly listing output for known playgrounds.
 //! - [`runner`]: runtime orchestration for launching agents in temporary copies.
 //! - [`schema`]: JSON Schema export utilities for configuration file models.
@@ -18,6 +19,8 @@
 
 /// Configuration models and helpers for loading and initializing playgrounds.
 pub mod config;
+/// Detailed information helpers for rendering one playground in CLI output.
+pub mod info;
 /// Listing helpers for rendering configured playgrounds in CLI output.
 pub mod listing;
 /// Runtime orchestration for launching agents in isolated temporary directories.
