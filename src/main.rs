@@ -8,7 +8,7 @@ use agent_playground::{
     config::{AppConfig, init_playground, remove_playground, resolve_playground_dir},
     info::show_playground_info,
     listing::list_playgrounds,
-    runner::{run_default_playground, run_playground},
+    runner::{DirectoryMount, run_default_playground, run_playground},
 };
 use anyhow::{Context, Result};
 use clap::{ArgAction, Args, Parser, Subcommand};
@@ -44,6 +44,13 @@ struct Cli {
         action = ArgAction::SetTrue
     )]
     save: bool,
+    #[arg(
+        long = "with",
+        value_name = "SOURCE[:RELATIVE_DESTINATION]",
+        help = "Symlink-mount an external directory into the temporary playground. Repeat to mount multiple directories.",
+        action = ArgAction::Append
+    )]
+    mounts: Vec<DirectoryMount>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -75,6 +82,13 @@ struct DefaultArgs {
         action = ArgAction::SetTrue
     )]
     save: bool,
+    #[arg(
+        long = "with",
+        value_name = "SOURCE[:RELATIVE_DESTINATION]",
+        help = "Symlink-mount an external directory into the temporary playground. Repeat to mount multiple directories.",
+        action = ArgAction::Append
+    )]
+    mounts: Vec<DirectoryMount>,
 }
 
 #[derive(Debug, Args)]
@@ -154,6 +168,7 @@ fn handle_run(cli: Cli) -> Result<()> {
             .context("missing playground_id")?,
         cli.agent_id.as_deref(),
         cli.save,
+        &cli.mounts,
     )?;
 
     process::exit(exit_code);
@@ -161,7 +176,8 @@ fn handle_run(cli: Cli) -> Result<()> {
 
 fn handle_default(args: DefaultArgs) -> Result<()> {
     let config = AppConfig::load()?;
-    let exit_code = run_default_playground(&config, args.agent_id.as_deref(), args.save)?;
+    let exit_code =
+        run_default_playground(&config, args.agent_id.as_deref(), args.save, &args.mounts)?;
 
     process::exit(exit_code);
 }
@@ -232,9 +248,12 @@ fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::{fs, path::Path};
+
+    use agent_playground::runner::DirectoryMount;
 
     use super::{build_cli, prompt_to_remove_playground};
+    use tempfile::tempdir;
 
     #[test]
     fn run_command_does_not_save_by_default() {
@@ -290,8 +309,20 @@ mod tests {
 
     #[test]
     fn default_subcommand_parses_agent_and_save_flag() {
+        let temp = tempdir().expect("tempdir");
+        let source = temp.path().join("shared");
+        fs::create_dir_all(&source).expect("create mount source");
+
         let matches = build_cli()
-            .try_get_matches_from(["apg", "default", "--agent", "codex", "--save"])
+            .try_get_matches_from([
+                "apg",
+                "default",
+                "--agent",
+                "codex",
+                "--save",
+                "--with",
+                &format!("{}:tools/shared", source.display()),
+            ])
             .expect("cli should parse");
 
         let Some(("default", default_matches)) = matches.subcommand() else {
@@ -302,6 +333,43 @@ mod tests {
             Some(&"codex".to_string())
         );
         assert_eq!(default_matches.get_one::<bool>("save"), Some(&true));
+        assert_eq!(
+            default_matches
+                .get_many::<DirectoryMount>("mounts")
+                .expect("mounts")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn run_command_parses_repeated_mount_flags() {
+        let temp = tempdir().expect("tempdir");
+        let source_a = temp.path().join("alpha");
+        let source_b = temp.path().join("beta");
+        fs::create_dir_all(&source_a).expect("create alpha");
+        fs::create_dir_all(&source_b).expect("create beta");
+
+        let matches = build_cli()
+            .try_get_matches_from([
+                "apg",
+                "demo",
+                "--with",
+                &source_a.display().to_string(),
+                "--with",
+                &format!("{}:nested/beta", source_b.display()),
+            ])
+            .expect("cli should parse");
+
+        let mounts = matches
+            .get_many::<DirectoryMount>("mounts")
+            .expect("mounts")
+            .cloned()
+            .collect::<Vec<_>>();
+
+        assert_eq!(mounts.len(), 2);
+        assert_eq!(mounts[0].destination, Path::new("alpha"));
+        assert_eq!(mounts[1].destination, Path::new("nested/beta"));
     }
 
     #[test]
