@@ -5,6 +5,7 @@
 //! final state as a snapshot.
 
 use std::{
+    collections::HashSet,
     fs,
     io::{self, BufRead, IsTerminal, Write},
     path::{Path, PathBuf},
@@ -281,12 +282,44 @@ fn load_playground_env(
 }
 
 fn copy_directory_contents(source: &Path, destination: &Path) -> Result<()> {
+    let mut active_directories = HashSet::new();
+    copy_directory_contents_following_symlinks(source, destination, &mut active_directories)
+}
+
+fn copy_directory_contents_following_symlinks(
+    source: &Path,
+    destination: &Path,
+    active_directories: &mut HashSet<PathBuf>,
+) -> Result<()> {
+    let canonical_source = fs::canonicalize(source)
+        .with_context(|| format!("failed to resolve {}", source.display()))?;
+    if !active_directories.insert(canonical_source.clone()) {
+        bail!(
+            "refusing to save playground snapshot because symlink traversal would revisit {}",
+            canonical_source.display()
+        );
+    }
+
+    let result = copy_directory_entries_following_symlinks(source, destination, active_directories);
+    active_directories.remove(&canonical_source);
+    result
+}
+
+fn copy_directory_entries_following_symlinks(
+    source: &Path,
+    destination: &Path,
+    active_directories: &mut HashSet<PathBuf>,
+) -> Result<()> {
     for entry in
         fs::read_dir(source).with_context(|| format!("failed to read {}", source.display()))?
     {
         let entry = entry
             .with_context(|| format!("failed to inspect an entry under {}", source.display()))?;
-        copy_path_following_symlinks(&entry.path(), &destination.join(entry.file_name()))?;
+        copy_path_following_symlinks(
+            &entry.path(),
+            &destination.join(entry.file_name()),
+            active_directories,
+        )?;
     }
 
     Ok(())
@@ -294,10 +327,6 @@ fn copy_directory_contents(source: &Path, destination: &Path) -> Result<()> {
 
 fn copy_path(source: &Path, destination: &Path) -> Result<()> {
     copy_path_with_symlink_behavior(source, destination, false)
-}
-
-fn copy_path_following_symlinks(source: &Path, destination: &Path) -> Result<()> {
-    copy_path_with_symlink_behavior(source, destination, true)
 }
 
 fn copy_path_with_symlink_behavior(
@@ -346,6 +375,37 @@ fn copy_path_with_symlink_behavior(
     );
 }
 
+fn copy_path_following_symlinks(
+    source: &Path,
+    destination: &Path,
+    active_directories: &mut HashSet<PathBuf>,
+) -> Result<()> {
+    let metadata = inspect_path(source, true)?;
+
+    if metadata.is_dir() {
+        fs::create_dir_all(destination)
+            .with_context(|| format!("failed to create {}", destination.display()))?;
+        return copy_directory_contents_following_symlinks(source, destination, active_directories);
+    }
+
+    if metadata.is_file() {
+        create_parent_dir(destination)?;
+        fs::copy(source, destination).with_context(|| {
+            format!(
+                "failed to copy {} to {}",
+                source.display(),
+                destination.display()
+            )
+        })?;
+        return Ok(());
+    }
+
+    bail!(
+        "unsupported file type while copying playground contents: {}",
+        source.display()
+    );
+}
+
 fn hardlink_path(source: &Path, destination: &Path) -> Result<()> {
     let metadata = fs::symlink_metadata(source)
         .with_context(|| format!("failed to inspect {}", source.display()))?;
@@ -368,13 +428,7 @@ fn hardlink_path(source: &Path, destination: &Path) -> Result<()> {
 
     if metadata.is_file() {
         create_parent_dir(destination)?;
-        fs::hard_link(source, destination).with_context(|| {
-            format!(
-                "failed to hard link {} to {}",
-                source.display(),
-                destination.display()
-            )
-        })?;
+        hard_link_or_copy(source, destination)?;
         return Ok(());
     }
 
@@ -382,6 +436,29 @@ fn hardlink_path(source: &Path, destination: &Path) -> Result<()> {
         "unsupported file type while hard-linking playground contents: {}",
         source.display()
     );
+}
+
+fn hard_link_or_copy(source: &Path, destination: &Path) -> Result<()> {
+    match fs::hard_link(source, destination) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::CrossesDevices => {
+            fs::copy(source, destination).with_context(|| {
+                format!(
+                    "failed to copy {} to {} after cross-device hard-link failure",
+                    source.display(),
+                    destination.display()
+                )
+            })?;
+            Ok(())
+        }
+        Err(error) => Err(error).with_context(|| {
+            format!(
+                "failed to hard link {} to {}",
+                source.display(),
+                destination.display()
+            )
+        }),
+    }
 }
 
 fn symlink_path(source: &Path, destination: &Path) -> Result<()> {
@@ -807,6 +884,27 @@ mod tests {
         assert_eq!(
             fs::read_to_string(saved_path.join("nested").join("task.md"))?,
             "nested"
+        );
+
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_to_save_snapshot_when_symlink_cycle_is_detected() -> Result<()> {
+        let source_dir = tempdir()?;
+        let save_root = tempdir()?;
+        let loop_dir = source_dir.path().join("loop");
+
+        std::os::unix::fs::symlink(source_dir.path(), &loop_dir)?;
+
+        let error = save_playground_snapshot(source_dir.path(), save_root.path(), "demo")
+            .expect_err("symlink cycle should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("refusing to save playground snapshot")
         );
 
         Ok(())
