@@ -132,6 +132,7 @@ mod tests {
             playground_defaults: crate::config::PlaygroundConfig {
                 default_agent: Some("claude".to_string()),
                 load_env: Some(false),
+                create_mode: None,
             },
             playgrounds: BTreeMap::new(),
         };
@@ -143,6 +144,7 @@ mod tests {
             playground: crate::config::PlaygroundConfig {
                 default_agent: Some("codex".to_string()),
                 load_env: None,
+                create_mode: None,
             },
         };
 
@@ -182,6 +184,7 @@ AGENT_CONFIG_DIRS:  .claude, .codex\n",
             playground_defaults: crate::config::PlaygroundConfig {
                 default_agent: Some("claude".to_string()),
                 load_env: Some(false),
+                create_mode: None,
             },
             playgrounds: BTreeMap::new(),
         };
