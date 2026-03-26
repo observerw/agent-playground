@@ -60,10 +60,21 @@ curl https://github.com/observerw/agent-playground/releases/latest/download/inst
 # `default` is reserved for the empty-playground subcommand and cannot be used as a playground id
 apg init demo
 # you can also initialize a playground and include specific agent config templates
-apg init demo --agent claude --agent codex
+apg init demo --agent claude --agent codex --agent opencode
 
 # list all configured playgrounds
 apg list
+
+# show detailed information for a playground
+apg info demo
+
+# print the absolute path to a playground template directory
+apg path demo
+
+# remove a playground from the config directory
+apg remove demo
+# skip the confirmation prompt
+apg remove demo --yes
 
 # run a playground with the default agent
 # almost equal to `cd /some/temp/dir && claude`
@@ -80,9 +91,12 @@ apg demo --with ~/workspace/shared-context
 # or map it to a custom relative path inside the playground
 # you will see a `context/shared` directory in the playground
 apg default --with ~/workspace/shared-context:context/shared
+# automatically save the temporary playground on normal exit (skips the interactive prompt)
+apg demo --save
+apg default --save
 ```
 
-When the agent exits, `apg` asks whether to keep the temporary playground copy. Enter `y` to save it under the configured archive directory, or press Enter to discard it.
+When the agent exits normally, `apg` asks whether to keep the temporary playground copy. Enter `y` to save it under the configured archive directory, or press Enter to discard it. Pass `--save` to skip the prompt and always save on normal exit.
 
 ## Configuration layout
 
@@ -132,6 +146,9 @@ default_agent = "claude"
 # When enabled, the `.env` file itself is still not copied into the
 # temporary or saved playground.
 load_env = false
+# Strategy used to materialize playground files into the temporary directory.
+# Accepted values: "copy" (default), "symlink", "hardlink".
+create_mode = "copy"
 ```
 
 Default values when `config.toml` is first created:
@@ -141,6 +158,7 @@ Default values when `config.toml` is first created:
 - `[agent].opencode = "opencode"`
 - `[playground].default_agent = "claude"`
 - `[playground].load_env = false`
+- `[playground].create_mode = "copy"`
 
 Each playground directory contains a flat `apg.toml` (not nested under
 `[playground]`) which can override the inherited root defaults:
@@ -157,6 +175,11 @@ default_agent = "codex"
 # Optional playground-specific override for whether to load `.env`.
 # If omitted, the value from config.toml [playground].load_env is used.
 load_env = true
+
+# Optional playground-specific strategy for materializing files into the
+# temporary directory. Accepted values: "copy", "symlink", "hardlink".
+# If omitted, the value from config.toml [playground].create_mode is used.
+create_mode = "copy"
 ```
 
 ## License
