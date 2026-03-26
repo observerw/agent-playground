@@ -322,7 +322,7 @@ fn parse_directory_mount(raw: &str) -> Result<DirectoryMount> {
 
 fn resolve_directory_mount_source(raw: &str) -> Result<PathBuf> {
     let source = fs::canonicalize(raw)
-        .with_context(|| format!("mount source directory '{}' does not exist", raw))?;
+        .with_context(|| format!("failed to resolve mount source directory '{}'", raw))?;
     let metadata = fs::metadata(&source)
         .with_context(|| format!("failed to inspect mount source {}", source.display()))?;
 
@@ -333,10 +333,9 @@ fn resolve_directory_mount_source(raw: &str) -> Result<PathBuf> {
     Ok(source)
 }
 
-fn default_directory_mount_destination(raw: &str, source: &Path) -> Result<PathBuf> {
-    Path::new(raw)
+fn default_directory_mount_destination(_: &str, source: &Path) -> Result<PathBuf> {
+    source
         .file_name()
-        .or_else(|| source.file_name())
         .map(PathBuf::from)
         .context("mount source must have a directory name or an explicit destination")
 }
@@ -454,26 +453,20 @@ fn copy_symlink(source: &Path, destination: &Path) -> Result<()> {
 
     let link_target = fs::read_link(source)
         .with_context(|| format!("failed to read symlink {}", source.display()))?;
-    let resolved_target = if link_target.is_absolute() {
-        link_target
-    } else {
-        source
-            .parent()
-            .unwrap_or_else(|| Path::new(""))
-            .join(link_target)
-    };
-    let target_metadata = fs::metadata(source).with_context(|| {
-        format!(
-            "failed to inspect the symlink target referenced by {}",
-            source.display()
-        )
-    })?;
 
-    create_symlink(&resolved_target, destination, target_metadata.is_dir()).with_context(|| {
+    #[cfg(unix)]
+    let is_dir_target = false;
+
+    #[cfg(windows)]
+    let is_dir_target = fs::metadata(source)
+        .map(|metadata| metadata.is_dir())
+        .unwrap_or(false);
+
+    create_symlink(&link_target, destination, is_dir_target).with_context(|| {
         format!(
             "failed to recreate symlink {} -> {}",
             destination.display(),
-            resolved_target.display()
+            link_target.display()
         )
     })?;
 
@@ -531,7 +524,7 @@ fn exit_code_from_status(status: process::ExitStatus) -> Result<(i32, bool)> {
 mod tests {
     use std::{
         collections::BTreeMap,
-        env, fs,
+        fs,
         path::{Path, PathBuf},
     };
 
@@ -541,9 +534,9 @@ mod tests {
     use crate::config::{AppConfig, ConfigPaths, PlaygroundConfig, PlaygroundDefinition};
 
     use super::{
-        DirectoryMount, copy_playground_contents, exit_code_from_status, parse_directory_mount,
-        prompt_to_save_playground_snapshot, run_default_playground, run_playground,
-        save_playground_snapshot, should_prompt_to_save_playground_snapshot,
+        DirectoryMount, copy_path, copy_playground_contents, exit_code_from_status,
+        parse_directory_mount, prompt_to_save_playground_snapshot, run_default_playground,
+        run_playground, save_playground_snapshot, should_prompt_to_save_playground_snapshot,
         should_save_playground_snapshot,
     };
 
@@ -1067,17 +1060,16 @@ mod tests {
     }
 
     #[test]
-    fn parses_directory_mount_with_default_destination_from_current_dir() -> Result<()> {
+    fn parses_directory_mount_with_default_destination_from_source_name() -> Result<()> {
         let temp = tempdir()?;
         let source = temp.path().join("outside");
         fs::create_dir_all(&source)?;
 
-        let current_dir = env::current_dir()?;
-        env::set_current_dir(temp.path())?;
-
-        let mount = parse_directory_mount("./outside")?;
-
-        env::set_current_dir(current_dir)?;
+        let mount = parse_directory_mount(
+            source
+                .to_str()
+                .expect("temporary directory path should be valid UTF-8"),
+        )?;
 
         assert_eq!(
             mount,
@@ -1117,6 +1109,29 @@ mod tests {
             .expect_err("absolute destination should be rejected");
 
         assert!(error.to_string().contains("must be a relative path"));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_symlink_preserves_relative_link_target() -> Result<()> {
+        let source_dir = tempdir()?;
+        let destination_dir = tempdir()?;
+        let nested_dir = source_dir.path().join("nested");
+        let target_dir = source_dir.path().join("target");
+        let source_link = nested_dir.join("shared");
+        let destination_link = destination_dir.path().join("nested").join("shared");
+
+        fs::create_dir_all(&nested_dir)?;
+        fs::create_dir_all(&target_dir)?;
+        std::os::unix::fs::symlink("../target", &source_link)?;
+
+        copy_path(&source_link, &destination_link)?;
+
+        assert_eq!(
+            fs::read_link(&destination_link)?,
+            PathBuf::from("../target")
+        );
         Ok(())
     }
 
