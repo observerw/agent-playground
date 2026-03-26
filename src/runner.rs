@@ -25,6 +25,14 @@ pub use crate::utils::symlink::DirectoryMount;
 const DOTENV_FILE_NAME: &str = ".env";
 const DEFAULT_PLAYGROUND_ID: &str = "__default__";
 
+struct RunContext<'a> {
+    playground_env: Vec<(String, String)>,
+    save_on_exit: bool,
+    saved_playgrounds_dir: &'a Path,
+    playground_id: &'a str,
+    mounts: &'a [DirectoryMount],
+}
+
 /// Runs a configured playground with the selected agent command.
 ///
 /// The execution flow is:
@@ -76,11 +84,13 @@ pub fn run_playground(
         temp_dir.path(),
         agent_id,
         agent_command,
-        playground_env,
-        save_on_exit,
-        &config.saved_playgrounds_dir,
-        playground_id,
-        mounts,
+        RunContext {
+            playground_env,
+            save_on_exit,
+            saved_playgrounds_dir: &config.saved_playgrounds_dir,
+            playground_id,
+            mounts,
+        },
     )
 }
 
@@ -112,11 +122,13 @@ pub fn run_default_playground(
         temp_dir.path(),
         agent_id,
         agent_command,
-        Vec::new(),
-        save_on_exit,
-        &config.saved_playgrounds_dir,
-        DEFAULT_PLAYGROUND_ID,
-        mounts,
+        RunContext {
+            playground_env: Vec::new(),
+            save_on_exit,
+            saved_playgrounds_dir: &config.saved_playgrounds_dir,
+            playground_id: DEFAULT_PLAYGROUND_ID,
+            mounts,
+        },
     )
 }
 
@@ -124,33 +136,29 @@ fn run_agent_in_directory(
     working_dir: &Path,
     agent_id: &str,
     agent_command: &str,
-    playground_env: Vec<(String, String)>,
-    save_on_exit: bool,
-    saved_playgrounds_dir: &Path,
-    playground_id: &str,
-    mounts: &[DirectoryMount],
+    run_context: RunContext<'_>,
 ) -> Result<i32> {
     let status = build_agent_command(agent_command)
-        .envs(playground_env)
+        .envs(run_context.playground_env)
         .current_dir(working_dir)
         .status()
         .with_context(|| format!("failed to start agent '{agent_id}'"))?;
 
     let (exit_code, exited_normally) = exit_code_from_status(status)?;
 
-    let should_save = should_save_playground_snapshot(exited_normally, save_on_exit)
+    let should_save = should_save_playground_snapshot(exited_normally, run_context.save_on_exit)
         || (should_prompt_to_save_playground_snapshot(
             exited_normally,
-            save_on_exit,
+            run_context.save_on_exit,
             is_interactive_terminal(),
         ) && prompt_to_save_playground_snapshot(io::stdin().lock(), &mut io::stdout().lock())?);
 
     if should_save {
         let saved_path = save_playground_snapshot(
             working_dir,
-            saved_playgrounds_dir,
-            playground_id,
-            mounted_paths(working_dir, mounts),
+            run_context.saved_playgrounds_dir,
+            run_context.playground_id,
+            mounted_paths(working_dir, run_context.mounts),
         )?;
         println!("saved playground snapshot to {}", saved_path.display());
     }
