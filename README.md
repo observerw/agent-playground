@@ -17,7 +17,7 @@
           \::::::/    /            \::::::/    /    \:::\   \:::\ \/____/  
            \::::/    /              \::::/    /      \:::\   \:::\____\    
            /:::/    /                \::/____/        \:::\  /:::/    /    
-          /:::/    /                  ~~               \:::\/:::/    /     
+          /:::/    /                                   \:::\/:::/    /     
          /:::/    /                                     \::::::/    /      
         /:::/    /                                       \::::/    /       
         \::/    /                                         \::/____/        
@@ -74,6 +74,12 @@ apg default
 apg demo --agent codex
 # or specify the agent for the empty playground
 apg default --agent codex
+# symlink-mount an external directory into the temporary playground
+# you will see a `shared-context` directory in the playground
+apg demo --with ~/workspace/shared-context
+# or map it to a custom relative path inside the playground
+# you will see a `context/shared` directory in the playground
+apg default --with ~/workspace/shared-context:context/shared
 ```
 
 When the agent exits, `apg` asks whether to keep the temporary playground copy. Enter `y` to save it under the configured archive directory, or press Enter to discard it.

@@ -18,6 +18,9 @@ use dotenvy::Error as DotenvError;
 use tempfile::tempdir;
 
 use crate::config::{AppConfig, CreateMode, PlaygroundDefinition};
+use crate::utils::symlink::{apply_directory_mounts, copy_symlink};
+
+pub use crate::utils::symlink::DirectoryMount;
 
 const DOTENV_FILE_NAME: &str = ".env";
 const DEFAULT_PLAYGROUND_ID: &str = "__default__";
@@ -49,6 +52,7 @@ pub fn run_playground(
     playground_id: &str,
     selected_agent_id: Option<&str>,
     save_on_exit: bool,
+    mounts: &[DirectoryMount],
 ) -> Result<i32> {
     let playground = config
         .playgrounds
@@ -65,6 +69,7 @@ pub fn run_playground(
 
     let temp_dir = tempdir().context("failed to create temporary playground directory")?;
     materialize_playground_contents(playground, load_env, create_mode, temp_dir.path())?;
+    apply_directory_mounts(temp_dir.path(), mounts)?;
     let playground_env = load_playground_env(playground, load_env)?;
 
     run_agent_in_directory(
@@ -75,6 +80,7 @@ pub fn run_playground(
         save_on_exit,
         &config.saved_playgrounds_dir,
         playground_id,
+        mounts,
     )
 }
 
@@ -86,6 +92,7 @@ pub fn run_default_playground(
     config: &AppConfig,
     selected_agent_id: Option<&str>,
     save_on_exit: bool,
+    mounts: &[DirectoryMount],
 ) -> Result<i32> {
     let default_agent = config
         .playground_defaults
@@ -99,6 +106,7 @@ pub fn run_default_playground(
         .with_context(|| format!("unknown agent '{agent_id}'"))?;
 
     let temp_dir = tempdir().context("failed to create temporary playground directory")?;
+    apply_directory_mounts(temp_dir.path(), mounts)?;
 
     run_agent_in_directory(
         temp_dir.path(),
@@ -108,6 +116,7 @@ pub fn run_default_playground(
         save_on_exit,
         &config.saved_playgrounds_dir,
         DEFAULT_PLAYGROUND_ID,
+        mounts,
     )
 }
 
@@ -119,6 +128,7 @@ fn run_agent_in_directory(
     save_on_exit: bool,
     saved_playgrounds_dir: &Path,
     playground_id: &str,
+    mounts: &[DirectoryMount],
 ) -> Result<i32> {
     let status = build_agent_command(agent_command)
         .envs(playground_env)
@@ -136,12 +146,23 @@ fn run_agent_in_directory(
         ) && prompt_to_save_playground_snapshot(io::stdin().lock(), &mut io::stdout().lock())?);
 
     if should_save {
-        let saved_path =
-            save_playground_snapshot(working_dir, saved_playgrounds_dir, playground_id)?;
+        let saved_path = save_playground_snapshot(
+            working_dir,
+            saved_playgrounds_dir,
+            playground_id,
+            mounted_paths(working_dir, mounts),
+        )?;
         println!("saved playground snapshot to {}", saved_path.display());
     }
 
     Ok(exit_code)
+}
+
+fn mounted_paths(working_dir: &Path, mounts: &[DirectoryMount]) -> HashSet<PathBuf> {
+    mounts
+        .iter()
+        .map(|mount| working_dir.join(&mount.destination))
+        .collect()
 }
 
 fn should_save_playground_snapshot(exited_normally: bool, save_on_exit: bool) -> bool {
@@ -181,6 +202,7 @@ fn save_playground_snapshot(
     source_dir: &Path,
     saved_playgrounds_dir: &Path,
     playground_id: &str,
+    preserved_symlink_paths: HashSet<PathBuf>,
 ) -> Result<PathBuf> {
     fs::create_dir_all(saved_playgrounds_dir)
         .with_context(|| format!("failed to create {}", saved_playgrounds_dir.display()))?;
@@ -188,7 +210,7 @@ fn save_playground_snapshot(
     let destination = next_saved_playground_dir(saved_playgrounds_dir, playground_id);
     fs::create_dir_all(&destination)
         .with_context(|| format!("failed to create {}", destination.display()))?;
-    copy_directory_contents(source_dir, &destination)?;
+    copy_directory_contents(source_dir, &destination, &preserved_symlink_paths)?;
 
     Ok(destination)
 }
@@ -281,14 +303,24 @@ fn load_playground_env(
     }
 }
 
-fn copy_directory_contents(source: &Path, destination: &Path) -> Result<()> {
+fn copy_directory_contents(
+    source: &Path,
+    destination: &Path,
+    preserved_symlink_paths: &HashSet<PathBuf>,
+) -> Result<()> {
     let mut active_directories = HashSet::new();
-    copy_directory_contents_following_symlinks(source, destination, &mut active_directories)
+    copy_directory_contents_following_symlinks(
+        source,
+        destination,
+        preserved_symlink_paths,
+        &mut active_directories,
+    )
 }
 
 fn copy_directory_contents_following_symlinks(
     source: &Path,
     destination: &Path,
+    preserved_symlink_paths: &HashSet<PathBuf>,
     active_directories: &mut HashSet<PathBuf>,
 ) -> Result<()> {
     let canonical_source = fs::canonicalize(source)
@@ -300,7 +332,12 @@ fn copy_directory_contents_following_symlinks(
         );
     }
 
-    let result = copy_directory_entries_following_symlinks(source, destination, active_directories);
+    let result = copy_directory_entries_following_symlinks(
+        source,
+        destination,
+        preserved_symlink_paths,
+        active_directories,
+    );
     active_directories.remove(&canonical_source);
     result
 }
@@ -308,6 +345,7 @@ fn copy_directory_contents_following_symlinks(
 fn copy_directory_entries_following_symlinks(
     source: &Path,
     destination: &Path,
+    preserved_symlink_paths: &HashSet<PathBuf>,
     active_directories: &mut HashSet<PathBuf>,
 ) -> Result<()> {
     for entry in
@@ -318,6 +356,7 @@ fn copy_directory_entries_following_symlinks(
         copy_path_following_symlinks(
             &entry.path(),
             &destination.join(entry.file_name()),
+            preserved_symlink_paths,
             active_directories,
         )?;
     }
@@ -335,6 +374,11 @@ fn copy_path_with_symlink_behavior(
     follow_symlinks: bool,
 ) -> Result<()> {
     let metadata = inspect_path(source, follow_symlinks)?;
+
+    if metadata.file_type().is_symlink() {
+        copy_symlink(source, destination)?;
+        return Ok(());
+    }
 
     if metadata.is_dir() {
         fs::create_dir_all(destination)
@@ -378,14 +422,30 @@ fn copy_path_with_symlink_behavior(
 fn copy_path_following_symlinks(
     source: &Path,
     destination: &Path,
+    preserved_symlink_paths: &HashSet<PathBuf>,
     active_directories: &mut HashSet<PathBuf>,
 ) -> Result<()> {
+    if preserved_symlink_paths.contains(source)
+        && fs::symlink_metadata(source)
+            .with_context(|| format!("failed to inspect {}", source.display()))?
+            .file_type()
+            .is_symlink()
+    {
+        copy_symlink(source, destination)?;
+        return Ok(());
+    }
+
     let metadata = inspect_path(source, true)?;
 
     if metadata.is_dir() {
         fs::create_dir_all(destination)
             .with_context(|| format!("failed to create {}", destination.display()))?;
-        return copy_directory_contents_following_symlinks(source, destination, active_directories);
+        return copy_directory_contents_following_symlinks(
+            source,
+            destination,
+            preserved_symlink_paths,
+            active_directories,
+        );
     }
 
     if metadata.is_file() {
@@ -544,7 +604,11 @@ fn exit_code_from_status(status: process::ExitStatus) -> Result<(i32, bool)> {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, fs, path::Path};
+    use std::{
+        collections::{BTreeMap, HashSet},
+        fs,
+        path::{Path, PathBuf},
+    };
 
     use anyhow::Result;
     use tempfile::tempdir;
@@ -552,11 +616,13 @@ mod tests {
     use crate::config::{
         AppConfig, ConfigPaths, CreateMode, PlaygroundConfig, PlaygroundDefinition,
     };
+    use crate::utils::symlink::{copy_symlink, parse_directory_mount};
 
     use super::{
-        exit_code_from_status, materialize_playground_contents, prompt_to_save_playground_snapshot,
-        run_default_playground, run_playground, save_playground_snapshot,
-        should_prompt_to_save_playground_snapshot, should_save_playground_snapshot,
+        DirectoryMount, exit_code_from_status, materialize_playground_contents,
+        prompt_to_save_playground_snapshot, run_default_playground, run_playground,
+        save_playground_snapshot, should_prompt_to_save_playground_snapshot,
+        should_save_playground_snapshot,
     };
 
     #[cfg(unix)]
@@ -588,6 +654,18 @@ mod tests {
     fn command_recording_env(var_name: &str) -> String {
         format!(
             "powershell -NoProfile -Command \"[System.IO.File]::WriteAllText('env.txt', $env:{var_name})\" && if exist .env exit /b 1 && if exist apg.toml exit /b 1"
+        )
+    }
+
+    #[cfg(unix)]
+    fn command_recording_mount(path: &str) -> String {
+        format!("cat '{path}' > mounted.txt")
+    }
+
+    #[cfg(windows)]
+    fn command_recording_mount(path: &str) -> String {
+        format!(
+            "powershell -NoProfile -Command \"Get-Content -Raw '{path}' | Set-Content -NoNewline mounted.txt\""
         )
     }
 
@@ -877,7 +955,12 @@ mod tests {
         fs::write(source_dir.path().join("notes.txt"), "hello")?;
         fs::write(nested_dir.join("task.md"), "nested")?;
 
-        let saved_path = save_playground_snapshot(source_dir.path(), save_root.path(), "demo")?;
+        let saved_path = save_playground_snapshot(
+            source_dir.path(),
+            save_root.path(),
+            "demo",
+            HashSet::new(),
+        )?;
 
         assert!(saved_path.starts_with(save_root.path()));
         assert_eq!(fs::read_to_string(saved_path.join("notes.txt"))?, "hello");
@@ -898,8 +981,13 @@ mod tests {
 
         std::os::unix::fs::symlink(source_dir.path(), &loop_dir)?;
 
-        let error = save_playground_snapshot(source_dir.path(), save_root.path(), "demo")
-            .expect_err("symlink cycle should fail");
+        let error = save_playground_snapshot(
+            source_dir.path(),
+            save_root.path(),
+            "demo",
+            HashSet::new(),
+        )
+        .expect_err("symlink cycle should fail");
 
         assert!(
             error
@@ -952,7 +1040,7 @@ mod tests {
         )?;
 
         let error =
-            run_playground(&config, "missing", None, false).expect_err("unknown playground");
+            run_playground(&config, "missing", None, false, &[]).expect_err("unknown playground");
 
         assert!(error.to_string().contains("unknown playground 'missing'"));
         Ok(())
@@ -972,8 +1060,8 @@ mod tests {
             &[("claude", command_writing_marker("default"))],
         )?;
 
-        let error =
-            run_playground(&config, "demo", Some("missing"), false).expect_err("unknown agent");
+        let error = run_playground(&config, "demo", Some("missing"), false, &[])
+            .expect_err("unknown agent");
 
         assert!(error.to_string().contains("unknown agent 'missing'"));
         Ok(())
@@ -993,7 +1081,7 @@ mod tests {
             &[("claude", command_writing_marker("default"))],
         )?;
 
-        let exit_code = run_playground(&config, "demo", None, true)?;
+        let exit_code = run_playground(&config, "demo", None, true, &[])?;
         let snapshot = single_saved_snapshot(save_root.path())?;
 
         assert_eq!(exit_code, 0);
@@ -1020,7 +1108,7 @@ mod tests {
             &[("claude", command_writing_marker("default"))],
         )?;
 
-        let exit_code = run_default_playground(&config, None, true)?;
+        let exit_code = run_default_playground(&config, None, true, &[])?;
         let snapshot = single_saved_snapshot(save_root.path())?;
 
         assert_eq!(exit_code, 0);
@@ -1054,7 +1142,7 @@ mod tests {
             ],
         )?;
 
-        let exit_code = run_default_playground(&config, Some("codex"), true)?;
+        let exit_code = run_default_playground(&config, Some("codex"), true, &[])?;
         let snapshot = single_saved_snapshot(save_root.path())?;
 
         assert_eq!(exit_code, 0);
@@ -1082,7 +1170,7 @@ mod tests {
             ],
         )?;
 
-        let exit_code = run_playground(&config, "demo", None, true)?;
+        let exit_code = run_playground(&config, "demo", None, true, &[])?;
         let snapshot = single_saved_snapshot(save_root.path())?;
 
         assert_eq!(exit_code, 0);
@@ -1111,7 +1199,7 @@ mod tests {
             ],
         )?;
 
-        let exit_code = run_playground(&config, "demo", Some("codex"), true)?;
+        let exit_code = run_playground(&config, "demo", Some("codex"), true, &[])?;
         let snapshot = single_saved_snapshot(save_root.path())?;
 
         assert_eq!(exit_code, 0);
@@ -1136,7 +1224,7 @@ mod tests {
             &[("claude", command_writing_marker("default"))],
         )?;
 
-        let exit_code = run_playground(&config, "demo", None, false)?;
+        let exit_code = run_playground(&config, "demo", None, false, &[])?;
 
         assert_eq!(exit_code, 0);
         assert_eq!(fs::read_dir(save_root.path())?.count(), 0);
@@ -1157,7 +1245,7 @@ mod tests {
             &[("claude", failing_command())],
         )?;
 
-        let exit_code = run_playground(&config, "demo", None, true)?;
+        let exit_code = run_playground(&config, "demo", None, true, &[])?;
 
         assert_eq!(exit_code, 7);
         assert_eq!(fs::read_dir(save_root.path())?.count(), 0);
@@ -1182,11 +1270,165 @@ mod tests {
             &[("claude", command_recording_env("PLAYGROUND_SECRET"))],
         )?;
 
-        let exit_code = run_playground(&config, "demo", None, true)?;
+        let exit_code = run_playground(&config, "demo", None, true, &[])?;
         let snapshot = single_saved_snapshot(save_root.path())?;
         assert_eq!(exit_code, 0);
         assert_eq!(fs::read_to_string(snapshot.join("env.txt"))?, "token-123");
         assert!(!snapshot.join(".env").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn parses_directory_mount_with_default_destination_from_source_name() -> Result<()> {
+        let temp = tempdir()?;
+        let source = temp.path().join("outside");
+        fs::create_dir_all(&source)?;
+
+        let mount = parse_directory_mount(
+            source
+                .to_str()
+                .expect("temporary directory path should be valid UTF-8"),
+        )?;
+
+        assert_eq!(
+            mount,
+            DirectoryMount {
+                source: fs::canonicalize(&source)?,
+                destination: PathBuf::from("outside"),
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn parses_directory_mount_with_explicit_relative_destination() -> Result<()> {
+        let temp = tempdir()?;
+        let source = temp.path().join("outside");
+        fs::create_dir_all(&source)?;
+
+        let mount = parse_directory_mount(&format!("{}:tools/shared", source.display()))?;
+
+        assert_eq!(
+            mount,
+            DirectoryMount {
+                source: fs::canonicalize(&source)?,
+                destination: PathBuf::from("tools/shared"),
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_absolute_directory_mount_destination() -> Result<()> {
+        let temp = tempdir()?;
+        let source = temp.path().join("outside");
+        fs::create_dir_all(&source)?;
+
+        let error = parse_directory_mount(&format!("{}:/absolute", source.display()))
+            .expect_err("absolute destination should be rejected");
+
+        assert!(error.to_string().contains("must be a relative path"));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_symlink_preserves_relative_link_target() -> Result<()> {
+        let source_dir = tempdir()?;
+        let destination_dir = tempdir()?;
+        let nested_dir = source_dir.path().join("nested");
+        let target_dir = source_dir.path().join("target");
+        let source_link = nested_dir.join("shared");
+        let destination_link = destination_dir.path().join("nested").join("shared");
+
+        fs::create_dir_all(&nested_dir)?;
+        fs::create_dir_all(&target_dir)?;
+        std::os::unix::fs::symlink("../target", &source_link)?;
+
+        copy_symlink(&source_link, &destination_link)?;
+
+        assert_eq!(
+            fs::read_link(&destination_link)?,
+            PathBuf::from("../target")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn mounts_external_directory_into_playground_and_preserves_symlink_in_snapshot() -> Result<()> {
+        let source_dir = tempdir()?;
+        let save_root = tempdir()?;
+        let external_dir = tempdir()?;
+        fs::write(external_dir.path().join("shared.txt"), "from-outside")?;
+
+        let config = make_config(
+            source_dir.path(),
+            save_root.path(),
+            "demo",
+            Some("claude"),
+            None,
+            None,
+            &[("claude", command_recording_mount("tools/shared/shared.txt"))],
+        )?;
+        let mounts = vec![DirectoryMount {
+            source: fs::canonicalize(external_dir.path())?,
+            destination: PathBuf::from("tools/shared"),
+        }];
+
+        let exit_code = run_playground(&config, "demo", None, true, &mounts)?;
+        let snapshot = single_saved_snapshot(save_root.path())?;
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(
+            fs::read_to_string(snapshot.join("mounted.txt"))?,
+            "from-outside"
+        );
+        let mounted_path = snapshot.join("tools").join("shared");
+        let metadata = fs::symlink_metadata(&mounted_path)?;
+        assert!(metadata.file_type().is_symlink());
+        assert_eq!(
+            fs::read_link(&mounted_path)?,
+            fs::canonicalize(external_dir.path())?
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn mounts_external_directory_into_empty_default_playground() -> Result<()> {
+        let source_dir = tempdir()?;
+        let save_root = tempdir()?;
+        let external_dir = tempdir()?;
+        fs::write(external_dir.path().join("shared.txt"), "from-outside")?;
+
+        let config = make_config(
+            source_dir.path(),
+            save_root.path(),
+            "demo",
+            Some("claude"),
+            None,
+            None,
+            &[("claude", command_recording_mount("shared/shared.txt"))],
+        )?;
+        let mounts = vec![DirectoryMount {
+            source: fs::canonicalize(external_dir.path())?,
+            destination: PathBuf::from("shared"),
+        }];
+
+        let exit_code = run_default_playground(&config, None, true, &mounts)?;
+        let snapshot = single_saved_snapshot(save_root.path())?;
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(
+            fs::read_to_string(snapshot.join("mounted.txt"))?,
+            "from-outside"
+        );
+        assert!(
+            fs::symlink_metadata(snapshot.join("shared"))?
+                .file_type()
+                .is_symlink()
+        );
+
         Ok(())
     }
 
@@ -1214,7 +1456,7 @@ mod tests {
             .playground
             .create_mode = Some(CreateMode::Symlink);
 
-        let exit_code = run_playground(&config, "demo", None, true)?;
+        let exit_code = run_playground(&config, "demo", None, true, &[])?;
         let snapshot = single_saved_snapshot(save_root.path())?;
 
         assert_eq!(exit_code, 0);
@@ -1223,6 +1465,9 @@ mod tests {
             "playground-create-mode-override"
         );
         assert_eq!(fs::read_to_string(snapshot.join("notes.txt"))?, "hello");
+        assert!(!fs::symlink_metadata(snapshot.join("notes.txt"))?
+            .file_type()
+            .is_symlink());
 
         Ok(())
     }
