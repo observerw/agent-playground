@@ -1,8 +1,8 @@
 //! Runtime execution for launching an agent inside a temporary playground.
 //!
-//! The runner copies playground files into a throwaway directory, executes the
-//! selected agent command in that directory, and optionally persists the final
-//! state as a snapshot.
+//! The runner materializes playground files into a throwaway directory, executes
+//! the selected agent command in that directory, and optionally persists the
+//! final state as a snapshot.
 
 use std::{
     fs,
@@ -16,7 +16,7 @@ use anyhow::{Context, Result, bail};
 use dotenvy::Error as DotenvError;
 use tempfile::tempdir;
 
-use crate::config::{AppConfig, PlaygroundDefinition};
+use crate::config::{AppConfig, CreateMode, PlaygroundDefinition};
 
 const DOTENV_FILE_NAME: &str = ".env";
 const DEFAULT_PLAYGROUND_ID: &str = "__default__";
@@ -26,7 +26,7 @@ const DEFAULT_PLAYGROUND_ID: &str = "__default__";
 /// The execution flow is:
 ///
 /// 1. Resolve the playground and agent command from [`AppConfig`].
-/// 2. Copy playground contents into a temporary directory.
+/// 2. Materialize playground contents into a temporary directory.
 /// 3. Optionally load `.env` key-value pairs into the child process.
 /// 4. Run the agent command in the temporary directory.
 /// 5. Optionally save a snapshot of that directory on normal exit.
@@ -60,9 +60,10 @@ pub fn run_playground(
         .get(agent_id)
         .with_context(|| format!("unknown agent '{agent_id}'"))?;
     let load_env = playground_config.load_env;
+    let create_mode = playground_config.create_mode;
 
     let temp_dir = tempdir().context("failed to create temporary playground directory")?;
-    copy_playground_contents(playground, load_env, temp_dir.path())?;
+    materialize_playground_contents(playground, load_env, create_mode, temp_dir.path())?;
     let playground_env = load_playground_env(playground, load_env)?;
 
     run_agent_in_directory(
@@ -208,9 +209,10 @@ fn next_saved_playground_dir(saved_playgrounds_dir: &Path, playground_id: &str) 
     candidate
 }
 
-fn copy_playground_contents(
+fn materialize_playground_contents(
     playground: &PlaygroundDefinition,
     load_env: bool,
+    create_mode: CreateMode,
     destination: &Path,
 ) -> Result<()> {
     for entry in fs::read_dir(&playground.directory)
@@ -228,10 +230,22 @@ fn copy_playground_contents(
             continue;
         }
 
-        copy_path(&source_path, &destination.join(entry.file_name()))?;
+        materialize_path(
+            &source_path,
+            &destination.join(entry.file_name()),
+            create_mode,
+        )?;
     }
 
     Ok(())
+}
+
+fn materialize_path(source: &Path, destination: &Path, create_mode: CreateMode) -> Result<()> {
+    match create_mode {
+        CreateMode::Copy => copy_path(source, destination),
+        CreateMode::Symlink => symlink_path(source, destination),
+        CreateMode::Hardlink => hardlink_path(source, destination),
+    }
 }
 
 fn should_skip_playground_path(
@@ -272,15 +286,26 @@ fn copy_directory_contents(source: &Path, destination: &Path) -> Result<()> {
     {
         let entry = entry
             .with_context(|| format!("failed to inspect an entry under {}", source.display()))?;
-        copy_path(&entry.path(), &destination.join(entry.file_name()))?;
+        copy_path_following_symlinks(&entry.path(), &destination.join(entry.file_name()))?;
     }
 
     Ok(())
 }
 
 fn copy_path(source: &Path, destination: &Path) -> Result<()> {
-    let metadata = fs::symlink_metadata(source)
-        .with_context(|| format!("failed to inspect {}", source.display()))?;
+    copy_path_with_symlink_behavior(source, destination, false)
+}
+
+fn copy_path_following_symlinks(source: &Path, destination: &Path) -> Result<()> {
+    copy_path_with_symlink_behavior(source, destination, true)
+}
+
+fn copy_path_with_symlink_behavior(
+    source: &Path,
+    destination: &Path,
+    follow_symlinks: bool,
+) -> Result<()> {
+    let metadata = inspect_path(source, follow_symlinks)?;
 
     if metadata.is_dir() {
         fs::create_dir_all(destination)
@@ -292,17 +317,18 @@ fn copy_path(source: &Path, destination: &Path) -> Result<()> {
             let entry = entry.with_context(|| {
                 format!("failed to inspect an entry under {}", source.display())
             })?;
-            copy_path(&entry.path(), &destination.join(entry.file_name()))?;
+            copy_path_with_symlink_behavior(
+                &entry.path(),
+                &destination.join(entry.file_name()),
+                follow_symlinks,
+            )?;
         }
 
         return Ok(());
     }
 
     if metadata.is_file() {
-        if let Some(parent) = destination.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create {}", parent.display()))?;
-        }
+        create_parent_dir(destination)?;
 
         fs::copy(source, destination).with_context(|| {
             format!(
@@ -318,6 +344,92 @@ fn copy_path(source: &Path, destination: &Path) -> Result<()> {
         "unsupported file type while copying playground contents: {}",
         source.display()
     );
+}
+
+fn hardlink_path(source: &Path, destination: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(source)
+        .with_context(|| format!("failed to inspect {}", source.display()))?;
+
+    if metadata.is_dir() {
+        fs::create_dir_all(destination)
+            .with_context(|| format!("failed to create {}", destination.display()))?;
+
+        for entry in
+            fs::read_dir(source).with_context(|| format!("failed to read {}", source.display()))?
+        {
+            let entry = entry.with_context(|| {
+                format!("failed to inspect an entry under {}", source.display())
+            })?;
+            hardlink_path(&entry.path(), &destination.join(entry.file_name()))?;
+        }
+
+        return Ok(());
+    }
+
+    if metadata.is_file() {
+        create_parent_dir(destination)?;
+        fs::hard_link(source, destination).with_context(|| {
+            format!(
+                "failed to hard link {} to {}",
+                source.display(),
+                destination.display()
+            )
+        })?;
+        return Ok(());
+    }
+
+    bail!(
+        "unsupported file type while hard-linking playground contents: {}",
+        source.display()
+    );
+}
+
+fn symlink_path(source: &Path, destination: &Path) -> Result<()> {
+    let metadata = inspect_path(source, true)?;
+
+    create_parent_dir(destination)?;
+    create_symlink(source, destination, metadata.is_dir()).with_context(|| {
+        format!(
+            "failed to symlink {} to {}",
+            source.display(),
+            destination.display()
+        )
+    })?;
+
+    Ok(())
+}
+
+fn inspect_path(path: &Path, follow_symlinks: bool) -> Result<fs::Metadata> {
+    let metadata = if follow_symlinks {
+        fs::metadata(path)
+    } else {
+        fs::symlink_metadata(path)
+    };
+
+    metadata.with_context(|| format!("failed to inspect {}", path.display()))
+}
+
+fn create_parent_dir(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+
+    Ok(())
+}
+
+#[cfg(unix)]
+fn create_symlink(source: &Path, destination: &Path, _is_dir: bool) -> io::Result<()> {
+    std::os::unix::fs::symlink(source, destination)
+}
+
+#[cfg(windows)]
+fn create_symlink(source: &Path, destination: &Path, is_dir: bool) -> io::Result<()> {
+    if is_dir {
+        std::os::windows::fs::symlink_dir(source, destination)
+    } else {
+        std::os::windows::fs::symlink_file(source, destination)
+    }
 }
 
 fn build_agent_command(agent_command: &str) -> ProcessCommand {
@@ -360,10 +472,12 @@ mod tests {
     use anyhow::Result;
     use tempfile::tempdir;
 
-    use crate::config::{AppConfig, ConfigPaths, PlaygroundConfig, PlaygroundDefinition};
+    use crate::config::{
+        AppConfig, ConfigPaths, CreateMode, PlaygroundConfig, PlaygroundDefinition,
+    };
 
     use super::{
-        copy_playground_contents, exit_code_from_status, prompt_to_save_playground_snapshot,
+        exit_code_from_status, materialize_playground_contents, prompt_to_save_playground_snapshot,
         run_default_playground, run_playground, save_playground_snapshot,
         should_prompt_to_save_playground_snapshot, should_save_playground_snapshot,
     };
@@ -429,6 +543,7 @@ mod tests {
             playground: PlaygroundConfig {
                 default_agent: default_agent.map(str::to_string),
                 load_env,
+                create_mode: None,
             },
         })
     }
@@ -462,6 +577,7 @@ mod tests {
             playground_defaults: PlaygroundConfig {
                 default_agent: default_agent.map(str::to_string),
                 load_env: Some(false),
+                create_mode: None,
             },
             playgrounds,
         })
@@ -489,7 +605,12 @@ mod tests {
             playground: PlaygroundConfig::default(),
         };
 
-        copy_playground_contents(&playground, false, destination_dir.path())?;
+        materialize_playground_contents(
+            &playground,
+            false,
+            CreateMode::Copy,
+            destination_dir.path(),
+        )?;
 
         assert!(!destination_dir.path().join("apg.toml").exists());
         assert_eq!(
@@ -523,13 +644,109 @@ mod tests {
             playground: PlaygroundConfig::default(),
         };
 
-        copy_playground_contents(&playground, true, destination_dir.path())?;
+        materialize_playground_contents(
+            &playground,
+            true,
+            CreateMode::Copy,
+            destination_dir.path(),
+        )?;
 
         assert!(!destination_dir.path().join(".env").exists());
         assert_eq!(
             fs::read_to_string(destination_dir.path().join("notes.txt"))?,
             "hello"
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn symlinks_playground_contents_when_requested() -> Result<()> {
+        let source_dir = tempdir()?;
+        let destination_dir = tempdir()?;
+        let config_file = source_dir.path().join("apg.toml");
+        let note_file = source_dir.path().join("notes.txt");
+        let nested_dir = source_dir.path().join("nested");
+
+        fs::write(&config_file, "description = 'ignored'")?;
+        fs::write(&note_file, "hello")?;
+        fs::create_dir_all(&nested_dir)?;
+        fs::write(nested_dir.join("task.md"), "nested")?;
+
+        let playground = PlaygroundDefinition {
+            id: "demo".to_string(),
+            description: "demo".to_string(),
+            directory: source_dir.path().to_path_buf(),
+            config_file,
+            playground: PlaygroundConfig::default(),
+        };
+
+        materialize_playground_contents(
+            &playground,
+            false,
+            CreateMode::Symlink,
+            destination_dir.path(),
+        )?;
+
+        assert!(
+            fs::symlink_metadata(destination_dir.path().join("notes.txt"))?
+                .file_type()
+                .is_symlink()
+        );
+        assert!(
+            fs::symlink_metadata(destination_dir.path().join("nested"))?
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            fs::read_to_string(destination_dir.path().join("nested").join("task.md"))?,
+            "nested"
+        );
+        assert!(!destination_dir.path().join("apg.toml").exists());
+
+        Ok(())
+    }
+
+    #[test]
+    fn hardlinks_playground_files_when_requested() -> Result<()> {
+        let source_dir = tempdir()?;
+        let destination_dir = tempdir()?;
+        let config_file = source_dir.path().join("apg.toml");
+        let note_file = source_dir.path().join("notes.txt");
+        let nested_dir = source_dir.path().join("nested");
+        let nested_file = nested_dir.join("task.md");
+
+        fs::write(&config_file, "description = 'ignored'")?;
+        fs::write(&note_file, "hello")?;
+        fs::create_dir_all(&nested_dir)?;
+        fs::write(&nested_file, "nested")?;
+
+        let playground = PlaygroundDefinition {
+            id: "demo".to_string(),
+            description: "demo".to_string(),
+            directory: source_dir.path().to_path_buf(),
+            config_file,
+            playground: PlaygroundConfig::default(),
+        };
+
+        materialize_playground_contents(
+            &playground,
+            false,
+            CreateMode::Hardlink,
+            destination_dir.path(),
+        )?;
+
+        let linked_note = destination_dir.path().join("notes.txt");
+        let linked_nested = destination_dir.path().join("nested").join("task.md");
+        assert!(linked_note.is_file());
+        assert!(linked_nested.is_file());
+        assert!(!fs::symlink_metadata(&linked_note)?.file_type().is_symlink());
+        assert!(
+            !fs::symlink_metadata(destination_dir.path().join("nested"))?
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(fs::read_to_string(linked_nested)?, "nested");
 
         Ok(())
     }
@@ -872,6 +1089,43 @@ mod tests {
         assert_eq!(exit_code, 0);
         assert_eq!(fs::read_to_string(snapshot.join("env.txt"))?, "token-123");
         assert!(!snapshot.join(".env").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn playground_create_mode_overrides_root_default_during_run() -> Result<()> {
+        let source_dir = tempdir()?;
+        let save_root = tempdir()?;
+        let mut config = make_config(
+            source_dir.path(),
+            save_root.path(),
+            "demo",
+            Some("claude"),
+            None,
+            None,
+            &[(
+                "claude",
+                command_writing_marker("playground-create-mode-override"),
+            )],
+        )?;
+        config.playground_defaults.create_mode = Some(CreateMode::Copy);
+        config
+            .playgrounds
+            .get_mut("demo")
+            .expect("demo playground")
+            .playground
+            .create_mode = Some(CreateMode::Symlink);
+
+        let exit_code = run_playground(&config, "demo", None, true)?;
+        let snapshot = single_saved_snapshot(save_root.path())?;
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(
+            fs::read_to_string(snapshot.join("agent.txt"))?.trim(),
+            "playground-create-mode-override"
+        );
+        assert_eq!(fs::read_to_string(snapshot.join("notes.txt"))?, "hello");
+
         Ok(())
     }
 }

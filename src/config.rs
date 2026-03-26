@@ -174,6 +174,19 @@ pub struct PlaygroundDefinition {
     pub playground: PlaygroundConfig,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "lowercase")]
+/// Strategy used to materialize playground contents into a temporary directory.
+pub enum CreateMode {
+    /// Recursively copy files into the temporary directory.
+    #[default]
+    Copy,
+    /// Create symlinks from the temporary directory back to the playground.
+    Symlink,
+    /// Recreate directories and hard-link regular files into the temporary directory.
+    Hardlink,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 /// Shared playground-scoped config fields used by root defaults and per-playground overrides.
 pub struct PlaygroundConfig {
@@ -183,6 +196,9 @@ pub struct PlaygroundConfig {
     /// Optional flag controlling `.env` loading in playground runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub load_env: Option<bool>,
+    /// Optional strategy for creating the temporary playground working tree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub create_mode: Option<CreateMode>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
@@ -212,6 +228,7 @@ struct ResolvedRootConfig {
 pub(crate) struct ResolvedPlaygroundConfig {
     pub(crate) default_agent: String,
     pub(crate) load_env: bool,
+    pub(crate) create_mode: CreateMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -229,11 +246,12 @@ impl PlaygroundConfig {
         Self {
             default_agent: Some("claude".to_string()),
             load_env: Some(false),
+            create_mode: Some(CreateMode::Copy),
         }
     }
 
     fn is_empty(&self) -> bool {
-        self.default_agent.is_none() && self.load_env.is_none()
+        self.default_agent.is_none() && self.load_env.is_none() && self.create_mode.is_none()
     }
 
     fn merged_over(&self, base: &Self) -> Self {
@@ -243,6 +261,7 @@ impl PlaygroundConfig {
                 .clone()
                 .or_else(|| base.default_agent.clone()),
             load_env: self.load_env.or(base.load_env),
+            create_mode: self.create_mode.or(base.create_mode),
         }
     }
 
@@ -254,6 +273,7 @@ impl PlaygroundConfig {
                 .default_agent
                 .context("default playground config is missing default_agent")?,
             load_env: merged.load_env.unwrap_or(false),
+            create_mode: merged.create_mode.unwrap_or(CreateMode::Copy),
         })
     }
 }
@@ -762,7 +782,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        APP_CONFIG_DIR, AppConfig, ConfigPaths, PlaygroundConfigFile, RootConfigFile,
+        APP_CONFIG_DIR, AppConfig, ConfigPaths, CreateMode, PlaygroundConfigFile, RootConfigFile,
         init_playground_at, init_playground_at_with_git, read_toml_file, remove_playground_at,
         resolve_playground_dir_at, user_config_base_dir,
     };
@@ -823,6 +843,10 @@ mod tests {
         );
         assert_eq!(config.playground_defaults.load_env, Some(false));
         assert_eq!(
+            config.playground_defaults.create_mode,
+            Some(CreateMode::Copy)
+        );
+        assert_eq!(
             config.saved_playgrounds_dir,
             temp_dir.path().join("saved-playgrounds")
         );
@@ -859,6 +883,7 @@ codex = "codex --fast"
 [playground]
 default_agent = "codex"
 load_env = true
+create_mode = "hardlink"
 "#,
         )
         .expect("write root config");
@@ -889,6 +914,10 @@ default_agent = "claude""#,
             Some("codex")
         );
         assert_eq!(config.playground_defaults.load_env, Some(true));
+        assert_eq!(
+            config.playground_defaults.create_mode,
+            Some(CreateMode::Hardlink)
+        );
         assert_eq!(config.saved_playgrounds_dir, root.join("archives"));
 
         let playground = config.playgrounds.get("demo").expect("demo playground");
@@ -903,6 +932,42 @@ default_agent = "claude""#,
             .expect("effective playground config");
         assert_eq!(effective_config.default_agent, "claude");
         assert!(effective_config.load_env);
+        assert_eq!(effective_config.create_mode, CreateMode::Hardlink);
+    }
+
+    #[test]
+    fn playground_create_mode_overrides_root_default() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        fs::write(
+            temp_dir.path().join("config.toml"),
+            r#"[playground]
+create_mode = "copy"
+"#,
+        )
+        .expect("write root config");
+        let playground_dir = temp_dir.path().join("playgrounds").join("demo");
+        fs::create_dir_all(&playground_dir).expect("create playground dir");
+        fs::write(
+            playground_dir.join("apg.toml"),
+            r#"description = "Demo playground"
+create_mode = "symlink""#,
+        )
+        .expect("write playground config");
+
+        let config =
+            AppConfig::load_from_paths(ConfigPaths::from_root_dir(temp_dir.path().to_path_buf()))
+                .expect("config should load");
+        let playground = config.playgrounds.get("demo").expect("demo playground");
+        let effective_config = config
+            .resolve_playground_config(playground)
+            .expect("effective playground config");
+
+        assert_eq!(
+            config.playground_defaults.create_mode,
+            Some(CreateMode::Copy)
+        );
+        assert_eq!(playground.playground.create_mode, Some(CreateMode::Symlink));
+        assert_eq!(effective_config.create_mode, CreateMode::Symlink);
     }
 
     #[test]
@@ -950,6 +1015,10 @@ default_agent = "codex""#,
             Some("claude")
         );
         assert_eq!(config.playground_defaults.load_env, Some(false));
+        assert_eq!(
+            config.playground_defaults.create_mode,
+            Some(CreateMode::Copy)
+        );
         assert_eq!(
             config.saved_playgrounds_dir,
             temp_dir.path().join("saved-playgrounds")
@@ -1323,6 +1392,26 @@ claude = "claude"
     }
 
     #[test]
+    fn errors_when_create_mode_is_invalid() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        fs::write(
+            temp_dir.path().join("config.toml"),
+            r#"[playground]
+create_mode = "clone"
+"#,
+        )
+        .expect("write invalid root config");
+
+        let error =
+            AppConfig::load_from_paths(ConfigPaths::from_root_dir(temp_dir.path().to_path_buf()))
+                .expect_err("invalid create_mode should fail");
+
+        let message = format!("{error:#}");
+        assert!(message.contains("create_mode"));
+        assert!(message.contains("clone"));
+    }
+
+    #[test]
     fn errors_when_playground_directory_uses_reserved_id() {
         let temp_dir = TempDir::new().expect("temp dir");
         fs::write(
@@ -1395,6 +1484,7 @@ claude = "claude"
         assert!(schema["properties"]["description"].is_object());
         assert!(schema["properties"]["default_agent"].is_object());
         assert!(schema["properties"]["load_env"].is_object());
+        assert!(schema["properties"]["create_mode"].is_object());
         assert_eq!(
             schema["required"],
             Value::Array(vec![Value::String("description".to_string())])
