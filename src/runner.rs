@@ -963,12 +963,8 @@ mod tests {
         fs::write(source_dir.path().join("notes.txt"), "hello")?;
         fs::write(nested_dir.join("task.md"), "nested")?;
 
-        let saved_path = save_playground_snapshot(
-            source_dir.path(),
-            save_root.path(),
-            "demo",
-            HashSet::new(),
-        )?;
+        let saved_path =
+            save_playground_snapshot(source_dir.path(), save_root.path(), "demo", HashSet::new())?;
 
         assert!(saved_path.starts_with(save_root.path()));
         assert_eq!(fs::read_to_string(saved_path.join("notes.txt"))?, "hello");
@@ -989,13 +985,9 @@ mod tests {
 
         std::os::unix::fs::symlink(source_dir.path(), &loop_dir)?;
 
-        let error = save_playground_snapshot(
-            source_dir.path(),
-            save_root.path(),
-            "demo",
-            HashSet::new(),
-        )
-        .expect_err("symlink cycle should fail");
+        let error =
+            save_playground_snapshot(source_dir.path(), save_root.path(), "demo", HashSet::new())
+                .expect_err("symlink cycle should fail");
 
         assert!(
             error
@@ -1473,9 +1465,11 @@ mod tests {
             "playground-create-mode-override"
         );
         assert_eq!(fs::read_to_string(snapshot.join("notes.txt"))?, "hello");
-        assert!(!fs::symlink_metadata(snapshot.join("notes.txt"))?
-            .file_type()
-            .is_symlink());
+        assert!(
+            !fs::symlink_metadata(snapshot.join("notes.txt"))?
+                .file_type()
+                .is_symlink()
+        );
 
         Ok(())
     }
