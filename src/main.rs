@@ -56,6 +56,8 @@ enum Commands {
     Info(InfoArgs),
     /// List all playgrounds
     List,
+    /// Print the absolute path for a playground template directory
+    Path(PathArgs),
     /// Remove a playground from the global config directory
     Remove(RemoveArgs),
 }
@@ -98,6 +100,15 @@ struct InfoArgs {
     #[arg(
         value_name = "PLAYGROUND_ID",
         help = "The playground identifier to inspect"
+    )]
+    playground_id: String,
+}
+
+#[derive(Debug, Args)]
+struct PathArgs {
+    #[arg(
+        value_name = "PLAYGROUND_ID",
+        help = "The playground identifier whose path should be printed"
     )]
     playground_id: String,
 }
@@ -166,6 +177,11 @@ fn handle_default(args: DefaultArgs) -> Result<()> {
     process::exit(exit_code);
 }
 
+fn handle_path(args: PathArgs) -> Result<()> {
+    println!("{}", resolve_playground_dir(&args.playground_id)?.display());
+    Ok(())
+}
+
 fn prompt_to_remove_playground<R: BufRead, W: Write>(
     playground_id: &str,
     playground_dir: &Path,
@@ -225,6 +241,7 @@ fn main() -> Result<()> {
             list_playgrounds()?;
             Ok(())
         }
+        Some(Commands::Path(args)) => handle_path(args),
         Some(Commands::Remove(args)) => handle_remove(args),
         None => handle_run(cli),
     }
@@ -325,6 +342,21 @@ mod tests {
         };
         assert_eq!(
             info_matches.get_one::<String>("playground_id"),
+            Some(&"demo".to_string())
+        );
+    }
+
+    #[test]
+    fn path_subcommand_parses_playground_id() {
+        let matches = build_cli()
+            .try_get_matches_from(["apg", "path", "demo"])
+            .expect("cli should parse");
+
+        let Some(("path", path_matches)) = matches.subcommand() else {
+            panic!("path subcommand")
+        };
+        assert_eq!(
+            path_matches.get_one::<String>("playground_id"),
             Some(&"demo".to_string())
         );
     }
