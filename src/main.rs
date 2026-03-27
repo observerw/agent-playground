@@ -1,24 +1,31 @@
 use std::{
+    ffi::OsStr,
     io::{self, BufRead, Write},
     path::Path,
     process,
 };
 
 use agent_playground::{
-    config::{AppConfig, init_playground, remove_playground, resolve_playground_dir},
+    config::{
+        AppConfig, ConfiguredPlayground, configured_playgrounds, init_playground,
+        remove_playground, resolve_playground_dir,
+    },
     info::show_playground_info,
     listing::list_playgrounds,
     runner::{DirectoryMount, run_default_playground, run_playground},
 };
 use anyhow::{Context, Result};
-use clap::{ArgAction, Args, Parser, Subcommand};
-
-#[cfg(test)]
-use clap::CommandFactory;
+use clap::builder::StyledStr;
+use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand};
+use clap_complete::{
+    CompleteEnv,
+    engine::{ArgValueCompleter, CompletionCandidate},
+};
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "agent-playground",
+    name = "apg",
+    bin_name = "apg",
     about = "A minimal CLI for running agent in playground",
     arg_required_else_help = true
 )]
@@ -28,7 +35,8 @@ struct Cli {
     #[arg(
         value_name = "PLAYGROUND_ID",
         help = "The playground id to play in",
-        required = false
+        required = false,
+        add = ArgValueCompleter::new(complete_playground_ids)
     )]
     playground_id: Option<String>,
     #[arg(
@@ -113,7 +121,8 @@ struct InitArgs {
 struct InfoArgs {
     #[arg(
         value_name = "PLAYGROUND_ID",
-        help = "The playground identifier to inspect"
+        help = "The playground identifier to inspect",
+        add = ArgValueCompleter::new(complete_playground_ids)
     )]
     playground_id: String,
 }
@@ -122,7 +131,8 @@ struct InfoArgs {
 struct PathArgs {
     #[arg(
         value_name = "PLAYGROUND_ID",
-        help = "The playground identifier whose path should be printed"
+        help = "The playground identifier whose path should be printed",
+        add = ArgValueCompleter::new(complete_playground_ids)
     )]
     playground_id: String,
 }
@@ -131,7 +141,8 @@ struct PathArgs {
 struct RemoveArgs {
     #[arg(
         value_name = "PLAYGROUND_ID",
-        help = "The playground identifier to remove"
+        help = "The playground identifier to remove",
+        add = ArgValueCompleter::new(complete_playground_ids)
     )]
     playground_id: String,
     #[arg(
@@ -143,9 +154,39 @@ struct RemoveArgs {
     yes: bool,
 }
 
-#[cfg(test)]
 fn build_cli() -> clap::Command {
     Cli::command()
+}
+
+fn complete_playground_ids(current: &OsStr) -> Vec<CompletionCandidate> {
+    let Some(current) = current.to_str() else {
+        return Vec::new();
+    };
+
+    let Ok(playgrounds) = configured_playgrounds() else {
+        return Vec::new();
+    };
+
+    playgrounds
+        .into_iter()
+        .filter(|playground| playground.id.starts_with(current))
+        .map(playground_completion_candidate)
+        .collect()
+}
+
+fn playground_completion_candidate(playground: ConfiguredPlayground) -> CompletionCandidate {
+    let description = playground.description.trim();
+    let candidate = CompletionCandidate::new(playground.id);
+
+    if description.is_empty() {
+        candidate
+    } else {
+        candidate.help(Some(playground_completion_help(description)))
+    }
+}
+
+fn playground_completion_help(description: &str) -> StyledStr {
+    description.trim().to_owned().into()
 }
 
 fn handle_init(args: InitArgs) -> Result<()> {
@@ -247,6 +288,8 @@ fn handle_remove(args: RemoveArgs) -> Result<()> {
 }
 
 fn main() -> Result<()> {
+    CompleteEnv::with_factory(build_cli).complete();
+
     let cli = Cli::parse();
 
     match cli.command {
@@ -455,6 +498,14 @@ mod tests {
             error.kind(),
             clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
         );
+    }
+
+    #[test]
+    fn cli_name_matches_installed_binary_for_shell_completion() {
+        let cli = build_cli();
+
+        assert_eq!(cli.get_name(), "apg");
+        assert_eq!(cli.get_bin_name(), Some("apg"));
     }
 
     #[test]

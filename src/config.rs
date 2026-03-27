@@ -174,6 +174,15 @@ pub struct PlaygroundDefinition {
     pub playground: PlaygroundConfig,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+/// Lightweight playground metadata for side-effect-free UI surfaces like shell completion.
+pub struct ConfiguredPlayground {
+    /// Stable playground identifier (directory name).
+    pub id: String,
+    /// Human-readable description from `apg.toml`.
+    pub description: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "lowercase")]
 /// Strategy used to materialize playground contents into a temporary directory.
@@ -421,6 +430,27 @@ where
     })
 }
 
+/// Returns the ids of configured playgrounds without mutating user config.
+///
+/// Unlike [`AppConfig::load`], this does not create default config files or
+/// directories when they are missing. Invalid or incomplete playground
+/// directories are ignored so completion-oriented callers can fail soft.
+pub fn configured_playground_ids() -> Result<Vec<String>> {
+    Ok(configured_playgrounds()?
+        .into_iter()
+        .map(|playground| playground.id)
+        .collect())
+}
+
+/// Returns configured playground metadata without mutating user config.
+///
+/// Unlike [`AppConfig::load`], this does not create default config files or
+/// directories when they are missing. Invalid or incomplete playground
+/// directories are ignored so completion-oriented callers can fail soft.
+pub fn configured_playgrounds() -> Result<Vec<ConfiguredPlayground>> {
+    configured_playgrounds_at(&ConfigPaths::from_user_config_dir()?.playgrounds_dir)
+}
+
 /// Resolves an existing playground directory under the global config root.
 pub fn resolve_playground_dir(playground_id: &str) -> Result<PathBuf> {
     resolve_playground_dir_at(ConfigPaths::from_user_config_dir()?, playground_id)
@@ -471,6 +501,60 @@ fn resolve_playground_dir_at(paths: ConfigPaths, playground_id: &str) -> Result<
     }
 
     Ok(playground_dir)
+}
+
+fn configured_playgrounds_at(playgrounds_dir: &Path) -> Result<Vec<ConfiguredPlayground>> {
+    if !playgrounds_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    if !playgrounds_dir.is_dir() {
+        bail!(
+            "playground config path is not a directory: {}",
+            playgrounds_dir.display()
+        );
+    }
+
+    let mut playgrounds = Vec::new();
+    for entry_result in fs::read_dir(playgrounds_dir)
+        .with_context(|| format!("failed to read {}", playgrounds_dir.display()))?
+    {
+        let Ok(entry) = entry_result else {
+            // Skip entries that cannot be inspected (e.g., PermissionDenied).
+            continue;
+        };
+
+        let Ok(file_type) = entry.file_type() else {
+            // Skip entries whose type cannot be determined.
+            continue;
+        };
+
+        if !file_type.is_dir() {
+            continue;
+        }
+
+        let playground_id = entry.file_name().to_string_lossy().into_owned();
+        if validate_playground_id(&playground_id).is_err() {
+            continue;
+        }
+
+        let config_file = entry.path().join(PLAYGROUND_CONFIG_FILE_NAME);
+        if !config_file.is_file() {
+            continue;
+        }
+
+        let Ok(playground_config) = read_toml_file::<PlaygroundConfigFile>(&config_file) else {
+            continue;
+        };
+
+        playgrounds.push(ConfiguredPlayground {
+            id: playground_id,
+            description: playground_config.description,
+        });
+    }
+
+    playgrounds.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(playgrounds)
 }
 
 fn validate_playground_id(playground_id: &str) -> Result<()> {
@@ -782,8 +866,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        APP_CONFIG_DIR, AppConfig, ConfigPaths, CreateMode, PlaygroundConfigFile, RootConfigFile,
-        init_playground_at, init_playground_at_with_git, read_toml_file, remove_playground_at,
+        APP_CONFIG_DIR, AppConfig, ConfigPaths, ConfiguredPlayground, CreateMode,
+        PlaygroundConfigFile, RootConfigFile, configured_playgrounds_at, init_playground_at,
+        init_playground_at_with_git, read_toml_file, remove_playground_at,
         resolve_playground_dir_at, user_config_base_dir,
     };
     use serde_json::Value;
@@ -1454,6 +1539,45 @@ claude = "claude"
                 .expect("config should load");
 
         assert!(config.playgrounds.is_empty());
+    }
+
+    #[test]
+    fn configured_playgrounds_only_returns_valid_initialized_directories() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let playgrounds_dir = temp_dir.path().join("playgrounds");
+        fs::create_dir_all(&playgrounds_dir).expect("create playgrounds dir");
+
+        let demo_dir = playgrounds_dir.join("demo");
+        fs::create_dir_all(&demo_dir).expect("create demo");
+        fs::write(demo_dir.join("apg.toml"), "description = 'Demo'").expect("write demo config");
+
+        let ops_dir = playgrounds_dir.join("ops");
+        fs::create_dir_all(&ops_dir).expect("create ops");
+        fs::write(ops_dir.join("apg.toml"), "description = 'Ops'").expect("write ops config");
+
+        fs::create_dir_all(playgrounds_dir.join("broken")).expect("create broken");
+        fs::create_dir_all(playgrounds_dir.join("default")).expect("create reserved");
+        fs::create_dir_all(playgrounds_dir.join("invalid")).expect("create invalid");
+        fs::write(
+            playgrounds_dir.join("invalid").join("apg.toml"),
+            "description = ",
+        )
+        .expect("write invalid config");
+        fs::write(playgrounds_dir.join("README.md"), "ignore me").expect("write file");
+
+        assert_eq!(
+            configured_playgrounds_at(&playgrounds_dir).expect("list playgrounds"),
+            vec![
+                ConfiguredPlayground {
+                    id: "demo".to_string(),
+                    description: "Demo".to_string(),
+                },
+                ConfiguredPlayground {
+                    id: "ops".to_string(),
+                    description: "Ops".to_string(),
+                }
+            ]
+        );
     }
 
     #[test]

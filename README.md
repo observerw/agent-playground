@@ -98,6 +98,23 @@ apg default --save
 
 When the agent exits normally, `apg` asks whether to keep the temporary playground copy. Enter `y` to save it under the configured archive directory, or press Enter to discard it. Pass `--save` to skip the prompt and always save on normal exit.
 
+## Shell completion
+
+`apg` supports dynamic shell completion for playground ids via `clap_complete`.
+Because the completion script calls back into `apg`, it stays in sync with the
+playgrounds currently configured on your machine.
+
+```sh
+# zsh: enable for the current shell session
+source <(COMPLETE=zsh apg)
+
+# bash: enable for the current shell session
+source <(COMPLETE=bash apg)
+
+# fish: enable for the current shell session
+COMPLETE=fish apg | source
+```
+
 ## Configuration layout
 
 The CLI stores configuration under `~/.config/agent-playground`.
