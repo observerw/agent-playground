@@ -29,11 +29,11 @@ It is currently supported on macOS and Linux.
 
 ## Motivation
 
-Agent harnesses are very useful, but they are designed to be launched from a specific working directory, like a codebase or a project folder, to perform a series of tasks. 
+Agent harnesses are useful, but they are usually meant to run from a real working directory, such as a codebase or project folder.
 
-Sometimes we only want to use them for a quick operation, such as calling a remote service through MCP, or for a one-off task such as searching the web and writing a short report. In those cases, manually creating and cleaning up a temporary working directory is unnecessary friction.
+Sometimes you only need an agent for a quick task, like calling a remote service through MCP or writing a short report from a web search. In those cases, creating and cleaning up a temporary working directory by hand is unnecessary friction.
 
-`apg` (abbrv. for "agent playground") CLI solves this by letting you define a set of template working directories, i.e. playgrounds, and spin up temporary copies from them to launch an agent. When the work is done, the temporary directory is cleaned up automatically (unless you choose to keep it).
+`apg` ("agent playground") solves this by letting you define template working directories, called playgrounds, and launch agents in temporary copies of them. When the work is done, the temporary directory is cleaned up automatically unless you choose to keep it.
 
 ## Install
 
