@@ -175,8 +175,14 @@ fn complete_playground_ids(current: &OsStr) -> Vec<CompletionCandidate> {
 }
 
 fn playground_completion_candidate(playground: ConfiguredPlayground) -> CompletionCandidate {
-    CompletionCandidate::new(playground.id)
-        .help(Some(playground_completion_help(&playground.description)))
+    let description = playground.description.trim();
+    let candidate = CompletionCandidate::new(playground.id);
+
+    if description.is_empty() {
+        candidate
+    } else {
+        candidate.help(Some(playground_completion_help(description)))
+    }
 }
 
 fn playground_completion_help(description: &str) -> StyledStr {
