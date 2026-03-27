@@ -516,16 +516,20 @@ fn configured_playgrounds_at(playgrounds_dir: &Path) -> Result<Vec<ConfiguredPla
     }
 
     let mut playgrounds = Vec::new();
-    for entry in fs::read_dir(playgrounds_dir)
+    for entry_result in fs::read_dir(playgrounds_dir)
         .with_context(|| format!("failed to read {}", playgrounds_dir.display()))?
     {
-        let entry =
-            entry.with_context(|| format!("failed to inspect {}", playgrounds_dir.display()))?;
-        if !entry
-            .file_type()
-            .with_context(|| format!("failed to inspect {}", entry.path().display()))?
-            .is_dir()
-        {
+        let Ok(entry) = entry_result else {
+            // Skip entries that cannot be inspected (e.g., PermissionDenied).
+            continue;
+        };
+
+        let Ok(file_type) = entry.file_type() else {
+            // Skip entries whose type cannot be determined.
+            continue;
+        };
+
+        if !file_type.is_dir() {
             continue;
         }
 
