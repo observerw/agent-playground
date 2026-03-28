@@ -77,6 +77,8 @@ pub struct AppConfig {
     pub paths: ConfigPaths,
     /// Agent identifier to shell command mapping from `[agent]`.
     pub agents: BTreeMap<String, String>,
+    /// Optional playground id used when `apg` runs without an explicit id.
+    pub default_playground: Option<String>,
     /// Destination directory where saved snapshot copies are written.
     pub saved_playgrounds_dir: PathBuf,
     /// Default playground runtime config inherited by all playgrounds.
@@ -98,6 +100,7 @@ impl AppConfig {
         ensure_root_initialized(&paths)?;
         let resolved_root_config = load_root_config(&paths)?;
         let agents = resolved_root_config.agents;
+        let default_playground = resolved_root_config.default_playground;
         let saved_playgrounds_dir = resolve_saved_playgrounds_dir(
             &paths.root_dir,
             resolved_root_config.saved_playgrounds_dir,
@@ -111,10 +114,12 @@ impl AppConfig {
         )?;
 
         let playgrounds = load_playgrounds(&paths.playgrounds_dir, &agents, &playground_defaults)?;
+        validate_default_playground(&playgrounds, default_playground.as_deref())?;
 
         Ok(Self {
             paths,
             agents,
+            default_playground,
             saved_playgrounds_dir,
             playground_defaults,
             playgrounds,
@@ -216,6 +221,9 @@ pub struct RootConfigFile {
     /// Agent id to command mapping under `[agent]`.
     #[serde(default)]
     pub agent: BTreeMap<String, String>,
+    /// Optional playground id used when `apg` runs without an explicit id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_playground: Option<String>,
     /// Optional directory for persisted playground snapshots.
     ///
     /// Relative paths are resolved against [`ConfigPaths::root_dir`].
@@ -229,6 +237,7 @@ pub struct RootConfigFile {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ResolvedRootConfig {
     agents: BTreeMap<String, String>,
+    default_playground: Option<String>,
     saved_playgrounds_dir: PathBuf,
     playground_defaults: PlaygroundConfig,
 }
@@ -300,6 +309,7 @@ impl RootConfigFile {
 
         Self {
             agent,
+            default_playground: None,
             saved_playgrounds_dir: Some(default_saved_playgrounds_dir(paths)),
             playground: PlaygroundConfig::builtin_defaults(),
         }
@@ -309,6 +319,7 @@ impl RootConfigFile {
         let defaults = Self::defaults_for_paths(paths);
         let mut agents = defaults.agent;
         agents.extend(self.agent);
+        let default_playground = self.default_playground;
 
         let saved_playgrounds_dir = self
             .saved_playgrounds_dir
@@ -318,6 +329,7 @@ impl RootConfigFile {
 
         Ok(ResolvedRootConfig {
             agents,
+            default_playground,
             saved_playgrounds_dir,
             playground_defaults,
         })
@@ -765,6 +777,24 @@ fn validate_default_agent_defined(
     Ok(())
 }
 
+fn validate_default_playground(
+    playgrounds: &BTreeMap<String, PlaygroundDefinition>,
+    default_playground: Option<&str>,
+) -> Result<()> {
+    let Some(default_playground) = default_playground else {
+        return Ok(());
+    };
+
+    validate_playground_id(default_playground)
+        .with_context(|| "default_playground is invalid".to_string())?;
+
+    if !playgrounds.contains_key(default_playground) {
+        bail!("default_playground '{default_playground}' is not a configured playground");
+    }
+
+    Ok(())
+}
+
 fn load_playgrounds(
     playgrounds_dir: &Path,
     agents: &BTreeMap<String, String>,
@@ -926,6 +956,7 @@ mod tests {
             config.playground_defaults.default_agent.as_deref(),
             Some("claude")
         );
+        assert_eq!(config.default_playground, None);
         assert_eq!(config.playground_defaults.load_env, Some(false));
         assert_eq!(
             config.playground_defaults.create_mode,
@@ -960,6 +991,7 @@ mod tests {
         fs::write(
             root.join("config.toml"),
             r#"saved_playgrounds_dir = "archives"
+default_playground = "demo"
 
 [agent]
 claude = "custom-claude"
@@ -998,6 +1030,7 @@ default_agent = "claude""#,
             config.playground_defaults.default_agent.as_deref(),
             Some("codex")
         );
+        assert_eq!(config.default_playground.as_deref(), Some("demo"));
         assert_eq!(config.playground_defaults.load_env, Some(true));
         assert_eq!(
             config.playground_defaults.create_mode,
@@ -1099,6 +1132,7 @@ default_agent = "codex""#,
             config.playground_defaults.default_agent.as_deref(),
             Some("claude")
         );
+        assert_eq!(config.default_playground, None);
         assert_eq!(config.playground_defaults.load_env, Some(false));
         assert_eq!(
             config.playground_defaults.create_mode,
@@ -1179,6 +1213,52 @@ default_agent = "codex""#,
                 .to_string()
                 .contains("default agent 'codex' is not defined")
         );
+    }
+
+    #[test]
+    fn errors_when_default_playground_is_not_configured() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        fs::write(
+            temp_dir.path().join("config.toml"),
+            r#"default_playground = "missing"
+
+[agent]
+claude = "claude"
+"#,
+        )
+        .expect("write root config");
+
+        let error =
+            AppConfig::load_from_paths(ConfigPaths::from_root_dir(temp_dir.path().to_path_buf()))
+                .expect_err("unknown default playground should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("default_playground 'missing' is not a configured playground")
+        );
+    }
+
+    #[test]
+    fn errors_when_default_playground_uses_reserved_name() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        fs::write(
+            temp_dir.path().join("config.toml"),
+            r#"default_playground = "default"
+
+[agent]
+claude = "claude"
+"#,
+        )
+        .expect("write root config");
+
+        let error =
+            AppConfig::load_from_paths(ConfigPaths::from_root_dir(temp_dir.path().to_path_buf()))
+                .expect_err("reserved default playground should fail");
+        let message = format!("{error:#}");
+
+        assert!(message.contains("default_playground is invalid"));
+        assert!(message.contains("reserved for the `default` subcommand"));
     }
 
     #[test]
@@ -1595,6 +1675,7 @@ claude = "claude"
 
         assert_eq!(schema["type"], Value::String("object".to_string()));
         assert!(schema["properties"]["agent"].is_object());
+        assert!(schema["properties"]["default_playground"].is_object());
         assert!(schema["properties"]["saved_playgrounds_dir"].is_object());
         assert!(schema["properties"]["playground"].is_object());
     }

@@ -79,6 +79,9 @@ apg remove demo --yes
 # run a playground with the default agent
 # almost equal to `cd /some/temp/dir && claude`
 apg demo
+# plain `apg` first uses configured `default_playground`
+# and otherwise falls back to `apg default`
+apg
 # run the default agent in an empty temporary playground
 apg default
 # or specify the agent to run with
@@ -142,6 +145,11 @@ The actual layout on disk looks like this:
 # Relative paths are resolved against ~/.config/agent-playground.
 saved_playgrounds_dir = "saved-playgrounds"
 
+# Optional playground id used when running `apg` without an explicit
+# playground argument.
+# This value must refer to an existing configured playground.
+default_playground = "demo"
+
 # Known agents. The key is the agent id used in `apg ... --agent <id>`,
 # and the value is the shell command used to launch it.
 [agent]
@@ -171,6 +179,7 @@ create_mode = "copy"
 Default values when `config.toml` is first created:
 
 - `saved_playgrounds_dir = "saved-playgrounds"`
+- `default_playground` is unset
 - `[agent].claude = "claude"`
 - `[agent].opencode = "opencode"`
 - `[playground].default_agent = "claude"`

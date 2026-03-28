@@ -736,6 +736,7 @@ mod tests {
         Ok(AppConfig {
             paths: ConfigPaths::from_root_dir(source_dir.join("config-root")),
             agents,
+            default_playground: None,
             saved_playgrounds_dir: save_root.to_path_buf(),
             playground_defaults: PlaygroundConfig {
                 default_agent: default_agent.map(str::to_string),

@@ -14,7 +14,7 @@ use agent_playground::{
     listing::list_playgrounds,
     runner::{DirectoryMount, run_default_playground, run_playground},
 };
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::builder::StyledStr;
 use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand};
 use clap_complete::{
@@ -26,8 +26,7 @@ use clap_complete::{
 #[command(
     name = "apg",
     bin_name = "apg",
-    about = "A minimal CLI for running agent in playground",
-    arg_required_else_help = true
+    about = "A minimal CLI for running agent in playground"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -211,17 +210,37 @@ fn handle_init(args: InitArgs) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RootRunMode<'a> {
+    Playground(&'a str),
+    EmptyDefault,
+}
+
+fn selected_run_mode<'a>(
+    config: &'a AppConfig,
+    requested_playground_id: Option<&'a str>,
+) -> RootRunMode<'a> {
+    if let Some(playground_id) = requested_playground_id.or(config.default_playground.as_deref()) {
+        RootRunMode::Playground(playground_id)
+    } else {
+        RootRunMode::EmptyDefault
+    }
+}
+
 fn handle_run(cli: Cli) -> Result<()> {
     let config = AppConfig::load()?;
-    let exit_code = run_playground(
-        &config,
-        cli.playground_id
-            .as_deref()
-            .context("missing playground_id")?,
-        cli.agent_id.as_deref(),
-        cli.save,
-        &cli.mounts,
-    )?;
+    let exit_code = match selected_run_mode(&config, cli.playground_id.as_deref()) {
+        RootRunMode::Playground(playground_id) => run_playground(
+            &config,
+            playground_id,
+            cli.agent_id.as_deref(),
+            cli.save,
+            &cli.mounts,
+        )?,
+        RootRunMode::EmptyDefault => {
+            run_default_playground(&config, cli.agent_id.as_deref(), cli.save, &cli.mounts)?
+        }
+    };
 
     process::exit(exit_code);
 }
@@ -312,7 +331,9 @@ mod tests {
 
     use agent_playground::runner::DirectoryMount;
 
-    use super::{build_cli, prompt_to_remove_playground};
+    use agent_playground::config::{AppConfig, ConfigPaths, PlaygroundConfig};
+
+    use super::{RootRunMode, build_cli, prompt_to_remove_playground, selected_run_mode};
     use tempfile::tempdir;
 
     #[test]
@@ -489,15 +510,61 @@ mod tests {
     }
 
     #[test]
-    fn root_command_requires_playground_or_subcommand() {
-        let error = build_cli()
+    fn root_command_accepts_empty_input() {
+        let matches = build_cli()
             .try_get_matches_from(["apg"])
-            .expect_err("cli should reject empty input");
+            .expect("cli should parse");
 
-        assert_eq!(
-            error.kind(),
-            clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
-        );
+        assert!(matches.subcommand_name().is_none());
+        assert!(matches.get_one::<String>("playground_id").is_none());
+    }
+
+    #[test]
+    fn selected_run_mode_prefers_explicit_id_over_default() {
+        let config = AppConfig {
+            paths: ConfigPaths::from_root_dir("/tmp/apg-config".into()),
+            agents: Default::default(),
+            default_playground: Some("default-demo".to_string()),
+            saved_playgrounds_dir: "/tmp/apg-saved".into(),
+            playground_defaults: PlaygroundConfig::default(),
+            playgrounds: Default::default(),
+        };
+
+        let selected = selected_run_mode(&config, Some("explicit-demo"));
+
+        assert_eq!(selected, RootRunMode::Playground("explicit-demo"));
+    }
+
+    #[test]
+    fn selected_run_mode_uses_configured_default() {
+        let config = AppConfig {
+            paths: ConfigPaths::from_root_dir("/tmp/apg-config".into()),
+            agents: Default::default(),
+            default_playground: Some("default-demo".to_string()),
+            saved_playgrounds_dir: "/tmp/apg-saved".into(),
+            playground_defaults: PlaygroundConfig::default(),
+            playgrounds: Default::default(),
+        };
+
+        let selected = selected_run_mode(&config, None);
+
+        assert_eq!(selected, RootRunMode::Playground("default-demo"));
+    }
+
+    #[test]
+    fn selected_run_mode_falls_back_to_empty_default_without_explicit_or_configured_default() {
+        let config = AppConfig {
+            paths: ConfigPaths::from_root_dir("/tmp/apg-config".into()),
+            agents: Default::default(),
+            default_playground: None,
+            saved_playgrounds_dir: "/tmp/apg-saved".into(),
+            playground_defaults: PlaygroundConfig::default(),
+            playgrounds: Default::default(),
+        };
+
+        let selected = selected_run_mode(&config, None);
+
+        assert_eq!(selected, RootRunMode::EmptyDefault);
     }
 
     #[test]
