@@ -510,7 +510,7 @@ mod tests {
     }
 
     #[test]
-    fn root_command_accepts_empty_input_for_configured_default_playground() {
+    fn root_command_accepts_empty_input() {
         let matches = build_cli()
             .try_get_matches_from(["apg"])
             .expect("cli should parse");
