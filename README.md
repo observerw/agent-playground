@@ -79,8 +79,8 @@ apg remove demo --yes
 # run a playground with the default agent
 # almost equal to `cd /some/temp/dir && claude`
 apg demo
-# or configure a global fallback playground so plain `apg` runs it
-# add `default_playground = "demo"` to ~/.config/agent-playground/config.toml
+# plain `apg` first uses configured `default_playground`
+# and otherwise falls back to `apg default`
 apg
 # run the default agent in an empty temporary playground
 apg default
