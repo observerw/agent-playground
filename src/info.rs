@@ -128,6 +128,7 @@ mod tests {
         let config = AppConfig {
             paths: ConfigPaths::from_root_dir(temp_dir.path().join("config-root")),
             agents,
+            default_playground: None,
             saved_playgrounds_dir: temp_dir.path().join("saved-playgrounds"),
             playground_defaults: crate::config::PlaygroundConfig {
                 default_agent: Some("claude".to_string()),
@@ -180,6 +181,7 @@ AGENT_CONFIG_DIRS:  .claude, .codex\n",
         let config = AppConfig {
             paths: ConfigPaths::from_root_dir(temp_dir.path().join("config-root")),
             agents,
+            default_playground: None,
             saved_playgrounds_dir: temp_dir.path().join("saved-playgrounds"),
             playground_defaults: crate::config::PlaygroundConfig {
                 default_agent: Some("claude".to_string()),

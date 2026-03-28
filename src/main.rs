@@ -26,8 +26,7 @@ use clap_complete::{
 #[command(
     name = "apg",
     bin_name = "apg",
-    about = "A minimal CLI for running agent in playground",
-    arg_required_else_help = true
+    about = "A minimal CLI for running agent in playground"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -211,13 +210,21 @@ fn handle_init(args: InitArgs) -> Result<()> {
     Ok(())
 }
 
+fn selected_run_playground_id<'a>(
+    config: &'a AppConfig,
+    requested_playground_id: Option<&'a str>,
+) -> Result<&'a str> {
+    requested_playground_id
+        .or(config.default_playground.as_deref())
+        .context("missing playground_id and no default_playground is configured")
+}
+
 fn handle_run(cli: Cli) -> Result<()> {
     let config = AppConfig::load()?;
+    let playground_id = selected_run_playground_id(&config, cli.playground_id.as_deref())?;
     let exit_code = run_playground(
         &config,
-        cli.playground_id
-            .as_deref()
-            .context("missing playground_id")?,
+        playground_id,
         cli.agent_id.as_deref(),
         cli.save,
         &cli.mounts,
@@ -312,7 +319,9 @@ mod tests {
 
     use agent_playground::runner::DirectoryMount;
 
-    use super::{build_cli, prompt_to_remove_playground};
+    use agent_playground::config::{AppConfig, ConfigPaths, PlaygroundConfig};
+
+    use super::{build_cli, prompt_to_remove_playground, selected_run_playground_id};
     use tempfile::tempdir;
 
     #[test]
@@ -489,14 +498,67 @@ mod tests {
     }
 
     #[test]
-    fn root_command_requires_playground_or_subcommand() {
-        let error = build_cli()
+    fn root_command_accepts_empty_input_for_configured_default_playground() {
+        let matches = build_cli()
             .try_get_matches_from(["apg"])
-            .expect_err("cli should reject empty input");
+            .expect("cli should parse");
 
-        assert_eq!(
-            error.kind(),
-            clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+        assert!(matches.subcommand_name().is_none());
+        assert!(matches.get_one::<String>("playground_id").is_none());
+    }
+
+    #[test]
+    fn selected_run_playground_prefers_explicit_id_over_default() {
+        let config = AppConfig {
+            paths: ConfigPaths::from_root_dir("/tmp/apg-config".into()),
+            agents: Default::default(),
+            default_playground: Some("default-demo".to_string()),
+            saved_playgrounds_dir: "/tmp/apg-saved".into(),
+            playground_defaults: PlaygroundConfig::default(),
+            playgrounds: Default::default(),
+        };
+
+        let selected =
+            selected_run_playground_id(&config, Some("explicit-demo")).expect("should select id");
+
+        assert_eq!(selected, "explicit-demo");
+    }
+
+    #[test]
+    fn selected_run_playground_uses_configured_default() {
+        let config = AppConfig {
+            paths: ConfigPaths::from_root_dir("/tmp/apg-config".into()),
+            agents: Default::default(),
+            default_playground: Some("default-demo".to_string()),
+            saved_playgrounds_dir: "/tmp/apg-saved".into(),
+            playground_defaults: PlaygroundConfig::default(),
+            playgrounds: Default::default(),
+        };
+
+        let selected =
+            selected_run_playground_id(&config, None).expect("should select configured default");
+
+        assert_eq!(selected, "default-demo");
+    }
+
+    #[test]
+    fn selected_run_playground_errors_without_explicit_or_default() {
+        let config = AppConfig {
+            paths: ConfigPaths::from_root_dir("/tmp/apg-config".into()),
+            agents: Default::default(),
+            default_playground: None,
+            saved_playgrounds_dir: "/tmp/apg-saved".into(),
+            playground_defaults: PlaygroundConfig::default(),
+            playgrounds: Default::default(),
+        };
+
+        let error = selected_run_playground_id(&config, None)
+            .expect_err("missing explicit and default playground should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("no default_playground is configured")
         );
     }
 
