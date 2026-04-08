@@ -79,11 +79,16 @@ apg remove demo --yes
 # run a playground with the default agent
 # almost equal to `cd /some/temp/dir && claude`
 apg demo
+# run directly in a specific directory
+# playground files are linked into this directory and removed on exit
+apg demo ~/workspace/live-playground
 # plain `apg` first uses configured `default_playground`
 # and otherwise falls back to `apg default`
 apg
 # run the default agent in an empty temporary playground
 apg default
+# run the empty default playground directly in a specific directory
+apg default ~/workspace/live-playground
 # or specify the agent to run with
 apg demo --agent codex
 # or specify the agent for the empty playground
@@ -100,6 +105,19 @@ apg default --save
 ```
 
 When the agent exits normally, `apg` asks whether to keep the temporary playground copy. Enter `y` to save it under the configured archive directory, or press Enter to discard it. Pass `--save` to skip the prompt and always save on normal exit.
+
+When you pass `in_path` (`apg <playground_id> <in_path>` or `apg default <in_path>`), `apg` runs directly in that directory instead of a temp dir:
+
+- If a playground source entry is a file and the destination name does not exist, `apg` creates a symlink.
+- If a source entry is a directory and the destination name does not exist, `apg` creates a symlink to that directory.
+- If both source and destination are directories, `apg` recursively applies the same rule to child entries.
+- Any destination conflict is skipped. Existing content in `in_path` always wins.
+- If `in_path` does not exist, `apg` creates it automatically.
+- If `in_path` exists but is not a directory, `apg` exits with an error.
+- On exit (including non-zero agent exit), `apg` removes links it created for this run.
+- In this mode, `--save` is ignored and no save prompt is shown.
+
+Subcommands must come first. For example, `apg demo list` is invalid; use `apg list`.
 
 ## Shell completion
 
