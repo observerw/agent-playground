@@ -124,7 +124,7 @@ struct InitArgs {
     #[arg(
         long = "agent",
         value_name = "AGENT_ID",
-        help = "Initialize the template config directory for an agent. Repeat to include multiple agents.",
+        help = "Initialize the config directory for an agent. Repeat to include multiple agents.",
         action = ArgAction::Append
     )]
     agent_ids: Vec<String>,
@@ -214,10 +214,10 @@ fn handle_init(args: InitArgs) -> Result<()> {
             .join(&result.playground_id)
             .display()
     );
-    if !result.initialized_agent_templates.is_empty() {
+    if !result.initialized_agent_configs.is_empty() {
         println!(
-            "initialized agent config templates: {}",
-            result.initialized_agent_templates.join(", ")
+            "initialized agent configs: {}",
+            result.initialized_agent_configs.join(", ")
         );
     }
 

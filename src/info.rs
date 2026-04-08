@@ -3,11 +3,14 @@
 //! This module powers the CLI `info` subcommand and focuses on
 //! presentation-oriented output for a single playground.
 
-use std::{collections::BTreeMap, fs, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+};
 
 use anyhow::{Context, Result};
 
-use crate::config::{AppConfig, PlaygroundDefinition};
+use crate::config::{AppConfig, PlaygroundDefinition, ResolvedAgentConfig};
 
 /// Loads application configuration and prints detailed information for one
 /// playground.
@@ -37,9 +40,10 @@ fn format_playground_info(config: &AppConfig, playground: &PlaygroundDefinition)
     let agent_command = config
         .agents
         .get(&effective_config.default_agent)
+        .map(|agent| agent.cmd.as_str())
         .with_context(|| {
             format!(
-                "default agent '{}' is not defined in [agent]",
+                "default agent '{}' is not defined in [agent.<id>]",
                 effective_config.default_agent
             )
         })?;
@@ -70,35 +74,18 @@ AGENT_CONFIG_DIRS:  {}\n",
 
 fn find_agent_config_dirs(
     playground_dir: &Path,
-    agents: &BTreeMap<String, String>,
+    agents: &BTreeMap<String, ResolvedAgentConfig>,
 ) -> Result<Vec<String>> {
-    let mut agent_config_dirs = Vec::new();
+    let mut agent_config_dirs = BTreeSet::new();
 
-    for entry in fs::read_dir(playground_dir)
-        .with_context(|| format!("failed to read {}", playground_dir.display()))?
-    {
-        let entry =
-            entry.with_context(|| format!("failed to inspect {}", playground_dir.display()))?;
-        let file_type = entry.file_type().with_context(|| {
-            format!("failed to inspect file type for {}", entry.path().display())
-        })?;
-
-        if !file_type.is_dir() {
-            continue;
-        }
-
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let Some(agent_id) = name.strip_prefix('.') else {
-            continue;
-        };
-
-        if agents.contains_key(agent_id) {
-            agent_config_dirs.push(name);
+    for agent in agents.values() {
+        let path = playground_dir.join(&agent.config_dir);
+        if path.is_dir() {
+            agent_config_dirs.insert(agent.config_dir.display().to_string());
         }
     }
 
-    agent_config_dirs.sort();
-    Ok(agent_config_dirs)
+    Ok(agent_config_dirs.into_iter().collect())
 }
 
 #[cfg(test)]
@@ -107,7 +94,7 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use crate::config::{AppConfig, ConfigPaths, PlaygroundDefinition};
+    use crate::config::{AppConfig, ConfigPaths, PlaygroundDefinition, ResolvedAgentConfig};
 
     use super::format_playground_info;
 
@@ -122,8 +109,20 @@ mod tests {
         fs::write(&config_file, "description = 'Demo playground'").expect("write config");
 
         let mut agents = BTreeMap::new();
-        agents.insert("claude".to_string(), "claude".to_string());
-        agents.insert("codex".to_string(), "codex exec".to_string());
+        agents.insert(
+            "claude".to_string(),
+            ResolvedAgentConfig {
+                cmd: "claude".to_string(),
+                config_dir: ".claude".into(),
+            },
+        );
+        agents.insert(
+            "codex".to_string(),
+            ResolvedAgentConfig {
+                cmd: "codex exec".to_string(),
+                config_dir: ".codex".into(),
+            },
+        );
 
         let config = AppConfig {
             paths: ConfigPaths::from_root_dir(temp_dir.path().join("config-root")),
@@ -176,7 +175,13 @@ AGENT_CONFIG_DIRS:  .claude, .codex\n",
         fs::write(&config_file, "description = 'Demo playground'").expect("write config");
 
         let mut agents = BTreeMap::new();
-        agents.insert("claude".to_string(), "claude".to_string());
+        agents.insert(
+            "claude".to_string(),
+            ResolvedAgentConfig {
+                cmd: "claude".to_string(),
+                config_dir: ".claude".into(),
+            },
+        );
 
         let config = AppConfig {
             paths: ConfigPaths::from_root_dir(temp_dir.path().join("config-root")),
