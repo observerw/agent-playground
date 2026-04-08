@@ -28,6 +28,7 @@ const DEFAULT_PLAYGROUND_ID: &str = "__default__";
 struct RunContext<'a> {
     playground_env: Vec<(String, String)>,
     save_on_exit: bool,
+    in_place_mode: bool,
     saved_playgrounds_dir: &'a Path,
     playground_id: &'a str,
     mounts: &'a [DirectoryMount],
@@ -61,7 +62,19 @@ pub fn run_playground(
     selected_agent_id: Option<&str>,
     save_on_exit: bool,
     mounts: &[DirectoryMount],
+    in_path: Option<&Path>,
 ) -> Result<i32> {
+    if let Some(in_path) = in_path {
+        return run_playground_in_dir(
+            config,
+            playground_id,
+            selected_agent_id,
+            in_path,
+            save_on_exit,
+            mounts,
+        );
+    }
+
     let playground = config
         .playgrounds
         .get(playground_id)
@@ -87,6 +100,7 @@ pub fn run_playground(
         RunContext {
             playground_env,
             save_on_exit,
+            in_place_mode: false,
             saved_playgrounds_dir: &config.saved_playgrounds_dir,
             playground_id,
             mounts,
@@ -125,11 +139,101 @@ pub fn run_default_playground(
         RunContext {
             playground_env: Vec::new(),
             save_on_exit,
+            in_place_mode: false,
             saved_playgrounds_dir: &config.saved_playgrounds_dir,
             playground_id: DEFAULT_PLAYGROUND_ID,
             mounts,
         },
     )
+}
+
+/// Runs a configured playground directly in an existing directory by
+/// temporarily injecting symlinks and cleaning them up after the agent exits.
+pub fn run_playground_in_dir(
+    config: &AppConfig,
+    playground_id: &str,
+    selected_agent_id: Option<&str>,
+    in_path: &Path,
+    save_on_exit: bool,
+    mounts: &[DirectoryMount],
+) -> Result<i32> {
+    let playground = config
+        .playgrounds
+        .get(playground_id)
+        .with_context(|| format!("unknown playground '{playground_id}'"))?;
+    let playground_config = config.resolve_playground_config(playground)?;
+    let agent_id = selected_agent_id.unwrap_or(&playground_config.default_agent);
+    let agent_command = config
+        .agents
+        .get(agent_id)
+        .with_context(|| format!("unknown agent '{agent_id}'"))?;
+    let load_env = playground_config.load_env;
+    let playground_env = load_playground_env(playground, load_env)?;
+
+    let working_dir = prepare_in_place_directory(in_path)?;
+    let mut link_session = LinkSession::default();
+    let run_result = (|| {
+        link_playground_into_directory(playground, load_env, working_dir, &mut link_session)?;
+        apply_directory_mounts_in_place(working_dir, mounts, &mut link_session)?;
+        run_agent_in_directory(
+            working_dir,
+            agent_id,
+            agent_command,
+            RunContext {
+                playground_env,
+                save_on_exit,
+                in_place_mode: true,
+                saved_playgrounds_dir: &config.saved_playgrounds_dir,
+                playground_id,
+                mounts,
+            },
+        )
+    })();
+    let cleanup_result = link_session.cleanup();
+
+    resolve_run_and_cleanup_result(run_result, cleanup_result)
+}
+
+/// Runs an empty default playground directly in an existing directory by
+/// temporarily mounting requested paths and cleaning them up after exit.
+pub fn run_default_playground_in_dir(
+    config: &AppConfig,
+    selected_agent_id: Option<&str>,
+    in_path: &Path,
+    save_on_exit: bool,
+    mounts: &[DirectoryMount],
+) -> Result<i32> {
+    let default_agent = config
+        .playground_defaults
+        .default_agent
+        .as_deref()
+        .context("default playground config is missing default_agent")?;
+    let agent_id = selected_agent_id.unwrap_or(default_agent);
+    let agent_command = config
+        .agents
+        .get(agent_id)
+        .with_context(|| format!("unknown agent '{agent_id}'"))?;
+    let working_dir = prepare_in_place_directory(in_path)?;
+    let mut link_session = LinkSession::default();
+    let run_result = (|| {
+        apply_directory_mounts_in_place(working_dir, mounts, &mut link_session)?;
+        run_agent_in_directory(
+            working_dir,
+            agent_id,
+            agent_command,
+            RunContext {
+                playground_env: Vec::new(),
+                save_on_exit,
+                in_place_mode: true,
+                saved_playgrounds_dir: &config.saved_playgrounds_dir,
+                playground_id: DEFAULT_PLAYGROUND_ID,
+                mounts,
+            },
+        )
+    })();
+    let cleanup_result = link_session.cleanup();
+
+    resolve_run_and_cleanup_result(run_result, cleanup_result)
 }
 
 fn run_agent_in_directory(
@@ -146,12 +250,16 @@ fn run_agent_in_directory(
 
     let (exit_code, exited_normally) = exit_code_from_status(status)?;
 
-    let should_save = should_save_playground_snapshot(exited_normally, run_context.save_on_exit)
-        || (should_prompt_to_save_playground_snapshot(
-            exited_normally,
-            run_context.save_on_exit,
-            is_interactive_terminal(),
-        ) && prompt_to_save_playground_snapshot(io::stdin().lock(), &mut io::stdout().lock())?);
+    let should_save = !run_context.in_place_mode
+        && (should_save_playground_snapshot(exited_normally, run_context.save_on_exit)
+            || (should_prompt_to_save_playground_snapshot(
+                exited_normally,
+                run_context.save_on_exit,
+                is_interactive_terminal(),
+            ) && prompt_to_save_playground_snapshot(
+                io::stdin().lock(),
+                &mut io::stdout().lock(),
+            )?));
 
     if should_save {
         let saved_path = save_playground_snapshot(
@@ -171,6 +279,320 @@ fn mounted_paths(working_dir: &Path, mounts: &[DirectoryMount]) -> HashSet<PathB
         .iter()
         .map(|mount| working_dir.join(&mount.destination))
         .collect()
+}
+
+#[derive(Debug, Default)]
+struct LinkSession {
+    created_symlinks: Vec<PathBuf>,
+    created_symlink_set: HashSet<PathBuf>,
+    created_directories: Vec<PathBuf>,
+    created_directory_set: HashSet<PathBuf>,
+}
+
+impl LinkSession {
+    fn record_symlink(&mut self, path: PathBuf) {
+        if self.created_symlink_set.insert(path.clone()) {
+            self.created_symlinks.push(path);
+        }
+    }
+
+    fn record_directory(&mut self, path: PathBuf) {
+        if self.created_directory_set.insert(path.clone()) {
+            self.created_directories.push(path);
+        }
+    }
+
+    fn cleanup(self) -> Result<()> {
+        let mut errors = Vec::new();
+
+        let mut symlinks = self.created_symlinks;
+        symlinks.sort_by_key(|path| std::cmp::Reverse(path_depth(path)));
+        for symlink in symlinks {
+            if let Err(error) = remove_symlink_if_present(&symlink) {
+                errors.push(format!(
+                    "failed to remove symlink {}: {error:#}",
+                    symlink.display()
+                ));
+            }
+        }
+
+        let mut directories = self.created_directories;
+        directories.sort_by_key(|path| std::cmp::Reverse(path_depth(path)));
+        for directory in directories {
+            if let Err(error) = remove_directory_if_empty(&directory) {
+                errors.push(format!(
+                    "failed to remove empty directory {}: {error:#}",
+                    directory.display()
+                ));
+            }
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            bail!("{}", errors.join("; "));
+        }
+    }
+}
+
+fn path_depth(path: &Path) -> usize {
+    path.components().count()
+}
+
+fn remove_symlink_if_present(path: &Path) -> Result<()> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to inspect {}", path.display()));
+        }
+    };
+
+    if !metadata.file_type().is_symlink() {
+        return Ok(());
+    }
+
+    #[cfg(unix)]
+    {
+        fs::remove_file(path).with_context(|| format!("failed to remove {}", path.display()))?;
+    }
+
+    #[cfg(windows)]
+    {
+        let is_dir_target = fs::metadata(path)
+            .map(|value| value.is_dir())
+            .unwrap_or(false);
+        let remove_result = if is_dir_target {
+            fs::remove_dir(path)
+        } else {
+            fs::remove_file(path)
+        };
+        remove_result.with_context(|| format!("failed to remove {}", path.display()))?;
+    }
+
+    Ok(())
+}
+
+fn remove_directory_if_empty(path: &Path) -> Result<()> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to inspect {}", path.display()));
+        }
+    };
+
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Ok(());
+    }
+
+    match fs::remove_dir(path) {
+        Ok(()) => Ok(()),
+        Err(error)
+            if error.kind() == io::ErrorKind::NotFound
+                || error.kind() == io::ErrorKind::DirectoryNotEmpty =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(error).with_context(|| format!("failed to remove {}", path.display())),
+    }
+}
+
+fn ensure_directory(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.is_dir() {
+                return Ok(());
+            }
+
+            bail!("in_path '{}' exists but is not a directory", path.display());
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to inspect {}", path.display()));
+        }
+    }
+
+    fs::create_dir_all(path).with_context(|| format!("failed to create {}", path.display()))?;
+    Ok(())
+}
+
+fn prepare_in_place_directory(in_path: &Path) -> Result<&Path> {
+    ensure_directory(in_path)?;
+    Ok(in_path)
+}
+
+fn resolve_run_and_cleanup_result(
+    run_result: Result<i32>,
+    cleanup_result: Result<()>,
+) -> Result<i32> {
+    match run_result {
+        Ok(exit_code) => {
+            cleanup_result?;
+            Ok(exit_code)
+        }
+        Err(run_error) => {
+            if let Err(cleanup_error) = cleanup_result {
+                return Err(run_error.context(format!(
+                    "failed to clean up in_path links: {cleanup_error:#}"
+                )));
+            }
+
+            Err(run_error)
+        }
+    }
+}
+
+fn link_playground_into_directory(
+    playground: &PlaygroundDefinition,
+    load_env: bool,
+    destination_root: &Path,
+    link_session: &mut LinkSession,
+) -> Result<()> {
+    for entry in fs::read_dir(&playground.directory)
+        .with_context(|| format!("failed to read {}", playground.directory.display()))?
+    {
+        let entry = entry.with_context(|| {
+            format!(
+                "failed to inspect an entry under {}",
+                playground.directory.display()
+            )
+        })?;
+        let source_path = entry.path();
+
+        if should_skip_playground_path(playground, load_env, &source_path) {
+            continue;
+        }
+
+        link_path_into_destination(
+            &source_path,
+            &destination_root.join(entry.file_name()),
+            link_session,
+        )?;
+    }
+
+    Ok(())
+}
+
+fn link_path_into_destination(
+    source: &Path,
+    destination: &Path,
+    link_session: &mut LinkSession,
+) -> Result<()> {
+    let source_metadata = inspect_path(source, true)?;
+    match fs::symlink_metadata(destination) {
+        Ok(destination_metadata) => {
+            if source_metadata.is_dir()
+                && destination_metadata.is_dir()
+                && !destination_metadata.file_type().is_symlink()
+            {
+                for entry in fs::read_dir(source)
+                    .with_context(|| format!("failed to read {}", source.display()))?
+                {
+                    let entry = entry.with_context(|| {
+                        format!("failed to inspect an entry under {}", source.display())
+                    })?;
+                    link_path_into_destination(
+                        &entry.path(),
+                        &destination.join(entry.file_name()),
+                        link_session,
+                    )?;
+                }
+            }
+            Ok(())
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            ensure_parent_directories(destination, link_session)?;
+            create_symlink(source, destination, source_metadata.is_dir()).with_context(|| {
+                format!(
+                    "failed to symlink {} to {}",
+                    source.display(),
+                    destination.display()
+                )
+            })?;
+            link_session.record_symlink(destination.to_path_buf());
+            Ok(())
+        }
+        Err(error) => {
+            Err(error).with_context(|| format!("failed to inspect {}", destination.display()))
+        }
+    }
+}
+
+fn ensure_parent_directories(path: &Path, link_session: &mut LinkSession) -> Result<()> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+
+    let mut current = PathBuf::new();
+    for component in parent.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) => {
+                let is_directory = if metadata.file_type().is_symlink() {
+                    fs::metadata(&current)
+                        .with_context(|| format!("failed to inspect {}", current.display()))?
+                        .is_dir()
+                } else {
+                    metadata.is_dir()
+                };
+
+                if is_directory {
+                    continue;
+                }
+
+                bail!(
+                    "cannot create {} because {} is not a directory",
+                    parent.display(),
+                    current.display()
+                );
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                fs::create_dir(&current)
+                    .with_context(|| format!("failed to create {}", current.display()))?;
+                link_session.record_directory(current.clone());
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to inspect {}", current.display()));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn apply_directory_mounts_in_place(
+    working_dir: &Path,
+    mounts: &[DirectoryMount],
+    link_session: &mut LinkSession,
+) -> Result<()> {
+    for mount in mounts {
+        let destination = working_dir.join(&mount.destination);
+        ensure_destination_absent(&destination)?;
+        ensure_parent_directories(&destination, link_session)?;
+        create_symlink(&mount.source, &destination, true).with_context(|| {
+            format!(
+                "failed to mount {} at {}",
+                mount.source.display(),
+                destination.display()
+            )
+        })?;
+        link_session.record_symlink(destination);
+    }
+
+    Ok(())
+}
+
+fn ensure_destination_absent(destination: &Path) -> Result<()> {
+    if fs::symlink_metadata(destination).is_ok() {
+        bail!(
+            "mount destination already exists inside playground: {}",
+            destination.display()
+        );
+    }
+
+    Ok(())
 }
 
 fn should_save_playground_snapshot(exited_normally: bool, save_on_exit: bool) -> bool {
@@ -628,8 +1050,8 @@ mod tests {
 
     use super::{
         DirectoryMount, exit_code_from_status, materialize_playground_contents,
-        prompt_to_save_playground_snapshot, run_default_playground, run_playground,
-        save_playground_snapshot, should_prompt_to_save_playground_snapshot,
+        prompt_to_save_playground_snapshot, run_default_playground, run_default_playground_in_dir,
+        run_playground, save_playground_snapshot, should_prompt_to_save_playground_snapshot,
         should_save_playground_snapshot,
     };
 
@@ -674,6 +1096,30 @@ mod tests {
     fn command_recording_mount(path: &str) -> String {
         format!(
             "powershell -NoProfile -Command \"Get-Content -Raw '{path}' | Set-Content -NoNewline mounted.txt\""
+        )
+    }
+
+    #[cfg(unix)]
+    fn command_copy_file(from: &str, to: &str) -> String {
+        format!("cat '{from}' > '{to}'")
+    }
+
+    #[cfg(windows)]
+    fn command_copy_file(from: &str, to: &str) -> String {
+        format!(
+            "powershell -NoProfile -Command \"Get-Content -Raw '{from}' | Set-Content -NoNewline '{to}'\""
+        )
+    }
+
+    #[cfg(unix)]
+    fn command_copy_file_and_fail(from: &str, to: &str, exit_code: i32) -> String {
+        format!("cat '{from}' > '{to}'; exit {exit_code}")
+    }
+
+    #[cfg(windows)]
+    fn command_copy_file_and_fail(from: &str, to: &str, exit_code: i32) -> String {
+        format!(
+            "powershell -NoProfile -Command \"Get-Content -Raw '{from}' | Set-Content -NoNewline '{to}'\" && exit /b {exit_code}"
         )
     }
 
@@ -1040,8 +1486,8 @@ mod tests {
             &[("claude", command_writing_marker("default"))],
         )?;
 
-        let error =
-            run_playground(&config, "missing", None, false, &[]).expect_err("unknown playground");
+        let error = run_playground(&config, "missing", None, false, &[], None)
+            .expect_err("unknown playground");
 
         assert!(error.to_string().contains("unknown playground 'missing'"));
         Ok(())
@@ -1061,7 +1507,7 @@ mod tests {
             &[("claude", command_writing_marker("default"))],
         )?;
 
-        let error = run_playground(&config, "demo", Some("missing"), false, &[])
+        let error = run_playground(&config, "demo", Some("missing"), false, &[], None)
             .expect_err("unknown agent");
 
         assert!(error.to_string().contains("unknown agent 'missing'"));
@@ -1082,7 +1528,7 @@ mod tests {
             &[("claude", command_writing_marker("default"))],
         )?;
 
-        let exit_code = run_playground(&config, "demo", None, true, &[])?;
+        let exit_code = run_playground(&config, "demo", None, true, &[], None)?;
         let snapshot = single_saved_snapshot(save_root.path())?;
 
         assert_eq!(exit_code, 0);
@@ -1171,7 +1617,7 @@ mod tests {
             ],
         )?;
 
-        let exit_code = run_playground(&config, "demo", None, true, &[])?;
+        let exit_code = run_playground(&config, "demo", None, true, &[], None)?;
         let snapshot = single_saved_snapshot(save_root.path())?;
 
         assert_eq!(exit_code, 0);
@@ -1200,7 +1646,7 @@ mod tests {
             ],
         )?;
 
-        let exit_code = run_playground(&config, "demo", Some("codex"), true, &[])?;
+        let exit_code = run_playground(&config, "demo", Some("codex"), true, &[], None)?;
         let snapshot = single_saved_snapshot(save_root.path())?;
 
         assert_eq!(exit_code, 0);
@@ -1225,7 +1671,7 @@ mod tests {
             &[("claude", command_writing_marker("default"))],
         )?;
 
-        let exit_code = run_playground(&config, "demo", None, false, &[])?;
+        let exit_code = run_playground(&config, "demo", None, false, &[], None)?;
 
         assert_eq!(exit_code, 0);
         assert_eq!(fs::read_dir(save_root.path())?.count(), 0);
@@ -1246,7 +1692,7 @@ mod tests {
             &[("claude", failing_command())],
         )?;
 
-        let exit_code = run_playground(&config, "demo", None, true, &[])?;
+        let exit_code = run_playground(&config, "demo", None, true, &[], None)?;
 
         assert_eq!(exit_code, 7);
         assert_eq!(fs::read_dir(save_root.path())?.count(), 0);
@@ -1271,7 +1717,7 @@ mod tests {
             &[("claude", command_recording_env("PLAYGROUND_SECRET"))],
         )?;
 
-        let exit_code = run_playground(&config, "demo", None, true, &[])?;
+        let exit_code = run_playground(&config, "demo", None, true, &[], None)?;
         let snapshot = single_saved_snapshot(save_root.path())?;
         assert_eq!(exit_code, 0);
         assert_eq!(fs::read_to_string(snapshot.join("env.txt"))?, "token-123");
@@ -1376,7 +1822,7 @@ mod tests {
             destination: PathBuf::from("tools/shared"),
         }];
 
-        let exit_code = run_playground(&config, "demo", None, true, &mounts)?;
+        let exit_code = run_playground(&config, "demo", None, true, &mounts, None)?;
         let snapshot = single_saved_snapshot(save_root.path())?;
 
         assert_eq!(exit_code, 0);
@@ -1457,7 +1903,7 @@ mod tests {
             .playground
             .create_mode = Some(CreateMode::Symlink);
 
-        let exit_code = run_playground(&config, "demo", None, true, &[])?;
+        let exit_code = run_playground(&config, "demo", None, true, &[], None)?;
         let snapshot = single_saved_snapshot(save_root.path())?;
 
         assert_eq!(exit_code, 0);
@@ -1471,6 +1917,183 @@ mod tests {
                 .file_type()
                 .is_symlink()
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn run_playground_in_path_injects_links_and_cleans_up_after_exit() -> Result<()> {
+        let source_dir = tempdir()?;
+        let save_root = tempdir()?;
+        let in_path = tempdir()?;
+        let nested = source_dir.path().join("nested");
+        fs::create_dir_all(&nested)?;
+        fs::write(nested.join("task.md"), "nested-task")?;
+
+        let config = make_config(
+            source_dir.path(),
+            save_root.path(),
+            "demo",
+            Some("claude"),
+            None,
+            None,
+            &[("claude", command_copy_file("notes.txt", "captured.txt"))],
+        )?;
+
+        let exit_code = run_playground(&config, "demo", None, true, &[], Some(in_path.path()))?;
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(
+            fs::read_to_string(in_path.path().join("captured.txt"))?,
+            "hello"
+        );
+        assert!(!in_path.path().join("notes.txt").exists());
+        assert!(!in_path.path().join("nested").exists());
+        assert_eq!(fs::read_dir(save_root.path())?.count(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn run_playground_in_path_merges_directory_entries_without_overwriting_conflicts() -> Result<()>
+    {
+        let source_dir = tempdir()?;
+        let save_root = tempdir()?;
+        let in_path = tempdir()?;
+        let source_shared = source_dir.path().join("shared");
+        let target_shared = in_path.path().join("shared");
+        fs::create_dir_all(&source_shared)?;
+        fs::create_dir_all(&target_shared)?;
+        fs::write(source_shared.join("from-playground.txt"), "playground")?;
+        fs::write(source_shared.join("collision.txt"), "playground-collision")?;
+        fs::write(target_shared.join("collision.txt"), "user-content")?;
+
+        let config = make_config(
+            source_dir.path(),
+            save_root.path(),
+            "demo",
+            Some("claude"),
+            None,
+            None,
+            &[(
+                "claude",
+                format!(
+                    "{} && {}",
+                    command_copy_file("shared/from-playground.txt", "linked.txt"),
+                    command_copy_file("shared/collision.txt", "collision_seen.txt")
+                ),
+            )],
+        )?;
+
+        let exit_code = run_playground(&config, "demo", None, false, &[], Some(in_path.path()))?;
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(
+            fs::read_to_string(in_path.path().join("linked.txt"))?,
+            "playground"
+        );
+        assert_eq!(
+            fs::read_to_string(in_path.path().join("collision_seen.txt"))?,
+            "user-content"
+        );
+        assert_eq!(
+            fs::read_to_string(target_shared.join("collision.txt"))?,
+            "user-content"
+        );
+        assert!(!target_shared.join("from-playground.txt").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn run_default_playground_in_path_mounts_and_cleans_up() -> Result<()> {
+        let source_dir = tempdir()?;
+        let save_root = tempdir()?;
+        let in_path = tempdir()?;
+        let external_dir = tempdir()?;
+        fs::write(external_dir.path().join("shared.txt"), "from-outside")?;
+        let mounts = vec![DirectoryMount {
+            source: fs::canonicalize(external_dir.path())?,
+            destination: PathBuf::from("shared"),
+        }];
+
+        let config = make_config(
+            source_dir.path(),
+            save_root.path(),
+            "demo",
+            Some("claude"),
+            None,
+            None,
+            &[(
+                "claude",
+                command_copy_file("shared/shared.txt", "mounted.txt"),
+            )],
+        )?;
+
+        let exit_code =
+            run_default_playground_in_dir(&config, None, in_path.path(), false, &mounts)?;
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(
+            fs::read_to_string(in_path.path().join("mounted.txt"))?,
+            "from-outside"
+        );
+        assert!(!in_path.path().join("shared").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn run_playground_in_path_cleans_up_links_on_failing_exit() -> Result<()> {
+        let source_dir = tempdir()?;
+        let save_root = tempdir()?;
+        let in_path = tempdir()?;
+        let config = make_config(
+            source_dir.path(),
+            save_root.path(),
+            "demo",
+            Some("claude"),
+            None,
+            None,
+            &[(
+                "claude",
+                command_copy_file_and_fail("notes.txt", "copied-before-fail.txt", 7),
+            )],
+        )?;
+
+        let exit_code = run_playground(&config, "demo", None, false, &[], Some(in_path.path()))?;
+
+        assert_eq!(exit_code, 7);
+        assert_eq!(
+            fs::read_to_string(in_path.path().join("copied-before-fail.txt"))?,
+            "hello"
+        );
+        assert!(!in_path.path().join("notes.txt").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn in_path_is_created_if_missing_and_errors_when_not_directory() -> Result<()> {
+        let source_dir = tempdir()?;
+        let save_root = tempdir()?;
+        let create_target = source_dir.path().join("new-run-dir");
+        let file_target = source_dir.path().join("not-a-directory");
+        fs::write(&file_target, "file")?;
+
+        let config = make_config(
+            source_dir.path(),
+            save_root.path(),
+            "demo",
+            Some("claude"),
+            None,
+            None,
+            &[("claude", command_writing_marker("ok"))],
+        )?;
+
+        let exit_code = run_default_playground_in_dir(&config, None, &create_target, false, &[])?;
+        assert_eq!(exit_code, 0);
+        assert!(create_target.is_dir());
+
+        let error = run_default_playground_in_dir(&config, None, &file_target, false, &[])
+            .expect_err("non-directory in_path should fail");
+        assert!(error.to_string().contains("exists but is not a directory"));
 
         Ok(())
     }

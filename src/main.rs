@@ -1,7 +1,7 @@
 use std::{
     ffi::OsStr,
     io::{self, BufRead, Write},
-    path::Path,
+    path::{Path, PathBuf},
     process,
 };
 
@@ -12,7 +12,9 @@ use agent_playground::{
     },
     info::show_playground_info,
     listing::list_playgrounds,
-    runner::{DirectoryMount, run_default_playground, run_playground},
+    runner::{
+        DirectoryMount, run_default_playground, run_default_playground_in_dir, run_playground,
+    },
 };
 use anyhow::Result;
 use clap::builder::StyledStr;
@@ -38,6 +40,12 @@ struct Cli {
         add = ArgValueCompleter::new(complete_playground_ids)
     )]
     playground_id: Option<String>,
+    #[arg(
+        value_name = "IN_PATH",
+        help = "Run directly in this directory and inject playground symlinks",
+        required = false
+    )]
+    in_path: Option<PathBuf>,
     #[arg(
         long = "agent",
         value_name = "AGENT_ID",
@@ -78,6 +86,12 @@ enum Commands {
 
 #[derive(Debug, Args)]
 struct DefaultArgs {
+    #[arg(
+        value_name = "IN_PATH",
+        help = "Run directly in this directory and inject playground symlinks",
+        required = false
+    )]
+    in_path: Option<PathBuf>,
     #[arg(
         long = "agent",
         value_name = "AGENT_ID",
@@ -227,7 +241,44 @@ fn selected_run_mode<'a>(
     }
 }
 
+fn reject_subcommand_named_in_path(
+    playground_id: Option<&str>,
+    in_path: Option<&Path>,
+) -> Result<()> {
+    const ROOT_SUBCOMMANDS: &[&str] = &["default", "init", "info", "list", "path", "remove"];
+
+    if playground_id.is_none() {
+        return Ok(());
+    }
+
+    let Some(in_path) = in_path else {
+        return Ok(());
+    };
+    let Some(name) = in_path.to_str() else {
+        return Ok(());
+    };
+    if ROOT_SUBCOMMANDS.contains(&name) {
+        anyhow::bail!(
+            "invalid in_path '{}': subcommand names are not allowed after PLAYGROUND_ID; run subcommands as `apg <subcommand> ...`",
+            name
+        );
+    }
+
+    Ok(())
+}
+
+fn reject_root_positionals_with_subcommand(cli: &Cli) -> Result<()> {
+    if cli.command.is_some() && (cli.playground_id.is_some() || cli.in_path.is_some()) {
+        anyhow::bail!(
+            "invalid command usage: subcommands must be used as `apg <subcommand> ...`, not after PLAYGROUND_ID"
+        );
+    }
+
+    Ok(())
+}
+
 fn handle_run(cli: Cli) -> Result<()> {
+    reject_subcommand_named_in_path(cli.playground_id.as_deref(), cli.in_path.as_deref())?;
     let config = AppConfig::load()?;
     let exit_code = match selected_run_mode(&config, cli.playground_id.as_deref()) {
         RootRunMode::Playground(playground_id) => run_playground(
@@ -236,9 +287,20 @@ fn handle_run(cli: Cli) -> Result<()> {
             cli.agent_id.as_deref(),
             cli.save,
             &cli.mounts,
+            cli.in_path.as_deref(),
         )?,
         RootRunMode::EmptyDefault => {
-            run_default_playground(&config, cli.agent_id.as_deref(), cli.save, &cli.mounts)?
+            if let Some(in_path) = cli.in_path.as_deref() {
+                run_default_playground_in_dir(
+                    &config,
+                    cli.agent_id.as_deref(),
+                    in_path,
+                    cli.save,
+                    &cli.mounts,
+                )?
+            } else {
+                run_default_playground(&config, cli.agent_id.as_deref(), cli.save, &cli.mounts)?
+            }
         }
     };
 
@@ -247,8 +309,17 @@ fn handle_run(cli: Cli) -> Result<()> {
 
 fn handle_default(args: DefaultArgs) -> Result<()> {
     let config = AppConfig::load()?;
-    let exit_code =
-        run_default_playground(&config, args.agent_id.as_deref(), args.save, &args.mounts)?;
+    let exit_code = if let Some(in_path) = args.in_path.as_deref() {
+        run_default_playground_in_dir(
+            &config,
+            args.agent_id.as_deref(),
+            in_path,
+            args.save,
+            &args.mounts,
+        )?
+    } else {
+        run_default_playground(&config, args.agent_id.as_deref(), args.save, &args.mounts)?
+    };
 
     process::exit(exit_code);
 }
@@ -310,6 +381,7 @@ fn main() -> Result<()> {
     CompleteEnv::with_factory(build_cli).complete();
 
     let cli = Cli::parse();
+    reject_root_positionals_with_subcommand(&cli)?;
 
     match cli.command {
         Some(Commands::Default(args)) => handle_default(args),
@@ -327,13 +399,21 @@ fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::Path};
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+    };
 
     use agent_playground::runner::DirectoryMount;
+    use clap::Parser;
 
     use agent_playground::config::{AppConfig, ConfigPaths, PlaygroundConfig};
 
-    use super::{RootRunMode, build_cli, prompt_to_remove_playground, selected_run_mode};
+    use super::{
+        Cli, RootRunMode, build_cli, prompt_to_remove_playground,
+        reject_root_positionals_with_subcommand, reject_subcommand_named_in_path,
+        selected_run_mode,
+    };
     use tempfile::tempdir;
 
     #[test]
@@ -517,6 +597,7 @@ mod tests {
 
         assert!(matches.subcommand_name().is_none());
         assert!(matches.get_one::<String>("playground_id").is_none());
+        assert!(matches.get_one::<PathBuf>("in_path").is_none());
     }
 
     #[test]
@@ -602,5 +683,59 @@ mod tests {
         .expect("prompt should succeed");
 
         assert!(!accepted);
+    }
+
+    #[test]
+    fn run_command_parses_in_path_positionally() {
+        let matches = build_cli()
+            .try_get_matches_from(["apg", "demo", "/tmp/work"])
+            .expect("cli should parse");
+
+        assert_eq!(
+            matches.get_one::<String>("playground_id"),
+            Some(&"demo".to_string())
+        );
+        assert_eq!(
+            matches.get_one::<PathBuf>("in_path"),
+            Some(&PathBuf::from("/tmp/work"))
+        );
+    }
+
+    #[test]
+    fn default_subcommand_parses_positional_in_path() {
+        let matches = build_cli()
+            .try_get_matches_from(["apg", "default", "/tmp/work"])
+            .expect("cli should parse");
+
+        let Some(("default", default_matches)) = matches.subcommand() else {
+            panic!("default subcommand")
+        };
+
+        assert_eq!(
+            default_matches.get_one::<PathBuf>("in_path"),
+            Some(&PathBuf::from("/tmp/work"))
+        );
+    }
+
+    #[test]
+    fn run_command_rejects_subcommand_name_as_in_path() {
+        let error = reject_subcommand_named_in_path(Some("demo"), Some(Path::new("list")))
+            .expect_err("in_path named as subcommand should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("subcommand names are not allowed")
+        );
+    }
+
+    #[test]
+    fn root_positionals_cannot_be_mixed_with_subcommand() {
+        let cli = Cli::parse_from(["apg", "demo", "list"]);
+
+        let error = reject_root_positionals_with_subcommand(&cli)
+            .expect_err("playground_id plus subcommand should fail");
+
+        assert!(error.to_string().contains("subcommands must be used"));
     }
 }
