@@ -24,6 +24,10 @@ pub use crate::utils::symlink::DirectoryMount;
 
 const DOTENV_FILE_NAME: &str = ".env";
 const DEFAULT_PLAYGROUND_ID: &str = "__default__";
+const AGENTS_FILE_NAME: &str = "AGENTS.md";
+const CLAUDE_FILE_NAME: &str = "CLAUDE.md";
+const MANAGED_INCLUDE_BEGIN_PREFIX: &str = "<!-- apg:begin managed-include path=\"";
+const MANAGED_INCLUDE_END_MARKER: &str = "<!-- apg:end managed-include -->";
 
 struct RunContext<'a> {
     playground_env: Vec<(String, String)>,
@@ -291,6 +295,13 @@ struct LinkSession {
     created_symlink_set: HashSet<PathBuf>,
     created_directories: Vec<PathBuf>,
     created_directory_set: HashSet<PathBuf>,
+    injected_blocks: Vec<ManagedIncludeInjection>,
+}
+
+#[derive(Debug)]
+struct ManagedIncludeInjection {
+    destination: PathBuf,
+    appended_block: String,
 }
 
 impl LinkSession {
@@ -306,8 +317,26 @@ impl LinkSession {
         }
     }
 
+    fn record_injected_block(&mut self, destination: PathBuf, appended_block: String) {
+        self.injected_blocks.push(ManagedIncludeInjection {
+            destination,
+            appended_block,
+        });
+    }
+
     fn cleanup(self) -> Result<()> {
         let mut errors = Vec::new();
+
+        for injection in self.injected_blocks.into_iter().rev() {
+            if let Err(error) =
+                remove_managed_include_block(&injection.destination, &injection.appended_block)
+            {
+                errors.push(format!(
+                    "failed to clean up managed include in {}: {error:#}",
+                    injection.destination.display()
+                ));
+            }
+        }
 
         let mut symlinks = self.created_symlinks;
         symlinks.sort_by_key(|path| std::cmp::Reverse(path_depth(path)));
@@ -439,7 +468,7 @@ fn resolve_run_and_cleanup_result(
         Err(run_error) => {
             if let Err(cleanup_error) = cleanup_result {
                 return Err(run_error.context(format!(
-                    "failed to clean up in_path links: {cleanup_error:#}"
+                    "failed to clean up in_path state: {cleanup_error:#}"
                 )));
             }
 
@@ -503,6 +532,10 @@ fn link_path_into_destination(
                         link_session,
                     )?;
                 }
+            } else if should_append_managed_include(source, &source_metadata, &destination_metadata)
+                && append_managed_include_block(source, destination, link_session)?
+            {
+                return Ok(());
             }
             Ok(())
         }
@@ -522,6 +555,95 @@ fn link_path_into_destination(
             Err(error).with_context(|| format!("failed to inspect {}", destination.display()))
         }
     }
+}
+
+fn should_append_managed_include(
+    source: &Path,
+    source_metadata: &fs::Metadata,
+    destination_metadata: &fs::Metadata,
+) -> bool {
+    source_metadata.is_file()
+        && destination_metadata.is_file()
+        && !destination_metadata.file_type().is_symlink()
+        && source
+            .file_name()
+            .is_some_and(|name| name == AGENTS_FILE_NAME || name == CLAUDE_FILE_NAME)
+}
+
+fn append_managed_include_block(
+    source: &Path,
+    destination: &Path,
+    link_session: &mut LinkSession,
+) -> Result<bool> {
+    let existing_content = match fs::read_to_string(destination) {
+        Ok(content) => content,
+        Err(error) if error.kind() == io::ErrorKind::InvalidData => return Ok(false),
+        Err(error) => return Ok(false),
+    };
+    let appended_block = managed_include_block(source, &existing_content)?;
+    let mut updated_content = existing_content;
+    updated_content.push_str(&appended_block);
+    fs::write(destination, updated_content).with_context(|| {
+        format!(
+            "failed to append managed include to {}",
+            destination.display()
+        )
+    })?;
+    link_session.record_injected_block(destination.to_path_buf(), appended_block);
+    Ok(true)
+}
+
+fn managed_include_block(source: &Path, existing_content: &str) -> Result<String> {
+    let source_path = absolute_managed_include_path(source)?;
+    let block = format!(
+        "{MANAGED_INCLUDE_BEGIN_PREFIX}{}\" -->\n@{}\n{MANAGED_INCLUDE_END_MARKER}\n",
+        source_path.display(),
+        source_path.display()
+    );
+
+    if existing_content.is_empty() || existing_content.ends_with('\n') {
+        Ok(block)
+    } else {
+        Ok(format!("\n{block}"))
+    }
+}
+
+fn absolute_managed_include_path(path: &Path) -> Result<&Path> {
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        bail!(
+            "managed include source path must be absolute: {}",
+            path.display()
+        );
+    }
+}
+
+fn remove_managed_include_block(destination: &Path, appended_block: &str) -> Result<()> {
+    let existing_content = match fs::read_to_string(destination) {
+        Ok(content) => content,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+            return Err(error).with_context(|| {
+                format!(
+                    "managed include file is not valid UTF-8: {}",
+                    destination.display()
+                )
+            });
+        }
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to read {}", destination.display()));
+        }
+    };
+
+    let Some(start) = existing_content.rfind(appended_block) else {
+        bail!("managed include block not found");
+    };
+    let mut updated_content = existing_content;
+    updated_content.replace_range(start..start + appended_block.len(), "");
+    fs::write(destination, updated_content)
+        .with_context(|| format!("failed to rewrite {}", destination.display()))?;
+    Ok(())
 }
 
 fn ensure_parent_directories(path: &Path, link_session: &mut LinkSession) -> Result<()> {
@@ -1055,9 +1177,10 @@ mod tests {
     use crate::utils::symlink::{copy_symlink, parse_directory_mount};
 
     use super::{
-        DirectoryMount, exit_code_from_status, materialize_playground_contents,
-        prompt_to_save_playground_snapshot, run_default_playground, run_default_playground_in_dir,
-        run_playground, save_playground_snapshot, should_prompt_to_save_playground_snapshot,
+        DirectoryMount, exit_code_from_status, managed_include_block,
+        materialize_playground_contents, prompt_to_save_playground_snapshot,
+        run_default_playground, run_default_playground_in_dir, run_playground,
+        save_playground_snapshot, should_prompt_to_save_playground_snapshot,
         should_save_playground_snapshot,
     };
 
@@ -2014,6 +2137,176 @@ mod tests {
             "user-content"
         );
         assert!(!target_shared.join("from-playground.txt").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn run_playground_in_path_appends_managed_include_for_agents_file_conflict() -> Result<()> {
+        let source_dir = tempdir()?;
+        let save_root = tempdir()?;
+        let in_path = tempdir()?;
+        let source_agents = source_dir.path().join("AGENTS.md");
+        let destination_agents = in_path.path().join("AGENTS.md");
+        let original_content = "existing instructions";
+        fs::write(&source_agents, "playground instructions\n")?;
+        fs::write(&destination_agents, original_content)?;
+
+        let expected_managed_block = managed_include_block(&source_agents, original_content)?;
+        let config = make_config(
+            source_dir.path(),
+            save_root.path(),
+            "demo",
+            Some("claude"),
+            None,
+            None,
+            &[("claude", command_copy_file("AGENTS.md", "captured.txt"))],
+        )?;
+
+        let exit_code = run_playground(&config, "demo", None, false, &[], Some(in_path.path()))?;
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(
+            fs::read_to_string(in_path.path().join("captured.txt"))?,
+            format!("{original_content}{expected_managed_block}")
+        );
+        assert_eq!(fs::read_to_string(&destination_agents)?, original_content);
+        Ok(())
+    }
+
+    #[test]
+    fn run_playground_in_path_appends_managed_include_for_claude_file_conflict() -> Result<()> {
+        let source_dir = tempdir()?;
+        let save_root = tempdir()?;
+        let in_path = tempdir()?;
+        let source_claude = source_dir.path().join("CLAUDE.md");
+        let destination_claude = in_path.path().join("CLAUDE.md");
+        let original_content = "existing claude instructions\n";
+        fs::write(&source_claude, "playground claude instructions\n")?;
+        fs::write(&destination_claude, original_content)?;
+
+        let expected_managed_block = managed_include_block(&source_claude, original_content)?;
+        let config = make_config(
+            source_dir.path(),
+            save_root.path(),
+            "demo",
+            Some("claude"),
+            None,
+            None,
+            &[("claude", command_copy_file("CLAUDE.md", "captured.txt"))],
+        )?;
+
+        let exit_code = run_playground(&config, "demo", None, false, &[], Some(in_path.path()))?;
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(
+            fs::read_to_string(in_path.path().join("captured.txt"))?,
+            format!("{original_content}{expected_managed_block}")
+        );
+        assert_eq!(fs::read_to_string(&destination_claude)?, original_content);
+        Ok(())
+    }
+
+    #[test]
+    fn run_playground_in_path_applies_managed_include_for_nested_agents_file_conflict() -> Result<()>
+    {
+        let source_dir = tempdir()?;
+        let save_root = tempdir()?;
+        let in_path = tempdir()?;
+        let source_nested = source_dir.path().join("nested");
+        let destination_nested = in_path.path().join("nested");
+        fs::create_dir_all(&source_nested)?;
+        fs::create_dir_all(&destination_nested)?;
+
+        let source_agents = source_nested.join("AGENTS.md");
+        let destination_agents = destination_nested.join("AGENTS.md");
+        let original_content = "nested existing instructions";
+        fs::write(&source_agents, "nested playground instructions\n")?;
+        fs::write(&destination_agents, original_content)?;
+
+        let expected_managed_block = managed_include_block(&source_agents, original_content)?;
+        let config = make_config(
+            source_dir.path(),
+            save_root.path(),
+            "demo",
+            Some("claude"),
+            None,
+            None,
+            &[(
+                "claude",
+                command_copy_file("nested/AGENTS.md", "captured.txt"),
+            )],
+        )?;
+
+        let exit_code = run_playground(&config, "demo", None, false, &[], Some(in_path.path()))?;
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(
+            fs::read_to_string(in_path.path().join("captured.txt"))?,
+            format!("{original_content}{expected_managed_block}")
+        );
+        assert_eq!(fs::read_to_string(&destination_agents)?, original_content);
+        Ok(())
+    }
+
+    #[test]
+    fn run_playground_in_path_cleans_up_managed_include_on_failing_exit() -> Result<()> {
+        let source_dir = tempdir()?;
+        let save_root = tempdir()?;
+        let in_path = tempdir()?;
+        let source_agents = source_dir.path().join("AGENTS.md");
+        let destination_agents = in_path.path().join("AGENTS.md");
+        let original_content = "existing instructions";
+        fs::write(&source_agents, "playground instructions\n")?;
+        fs::write(&destination_agents, original_content)?;
+
+        let config = make_config(
+            source_dir.path(),
+            save_root.path(),
+            "demo",
+            Some("claude"),
+            None,
+            None,
+            &[(
+                "claude",
+                command_copy_file_and_fail("AGENTS.md", "captured.txt", 7),
+            )],
+        )?;
+
+        let exit_code = run_playground(&config, "demo", None, false, &[], Some(in_path.path()))?;
+
+        assert_eq!(exit_code, 7);
+        assert!(fs::read_to_string(in_path.path().join("captured.txt"))?.contains("@/"));
+        assert_eq!(fs::read_to_string(&destination_agents)?, original_content);
+        Ok(())
+    }
+
+    #[test]
+    fn run_playground_in_path_still_symlinks_agents_file_when_destination_is_absent() -> Result<()>
+    {
+        let source_dir = tempdir()?;
+        let save_root = tempdir()?;
+        let in_path = tempdir()?;
+        let source_agents = source_dir.path().join("AGENTS.md");
+        fs::write(&source_agents, "playground instructions\n")?;
+
+        let config = make_config(
+            source_dir.path(),
+            save_root.path(),
+            "demo",
+            Some("claude"),
+            None,
+            None,
+            &[("claude", command_copy_file("AGENTS.md", "captured.txt"))],
+        )?;
+
+        let exit_code = run_playground(&config, "demo", None, false, &[], Some(in_path.path()))?;
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(
+            fs::read_to_string(in_path.path().join("captured.txt"))?,
+            "playground instructions\n"
+        );
+        assert!(!in_path.path().join("AGENTS.md").exists());
         Ok(())
     }
 
