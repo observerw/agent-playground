@@ -113,9 +113,10 @@ When you pass `in_path` (`apg <playground_id> <in_path>` or `apg default <in_pat
 - If a source entry is a directory and the destination name does not exist, `apg` creates a symlink to that directory.
 - If both source and destination are directories, `apg` recursively applies the same rule to child entries.
 - Any destination conflict is skipped. Existing content in `in_path` always wins.
+- Exception: if a conflicting file is `AGENTS.md` or `CLAUDE.md` and the destination is an existing non-symlink text file, `apg` appends a managed block containing `@/absolute/path/to/playground-file` to the destination for the duration of the run.
 - If `in_path` does not exist, `apg` creates it automatically.
 - If `in_path` exists but is not a directory, `apg` exits with an error.
-- On exit (including non-zero agent exit), `apg` removes links it created for this run.
+- On exit (including non-zero agent exit), `apg` removes links it created for this run and removes any managed `AGENTS.md` / `CLAUDE.md` include blocks it appended.
 - In this mode, `--save` is ignored and no save prompt is shown.
 
 Subcommands must come first. For example, `apg demo list` is invalid; use `apg list`.
