@@ -168,6 +168,7 @@ pub fn run_playground_in_dir(
     let agent_command = config
         .agents
         .get(agent_id)
+        .map(|agent| agent.cmd.as_str())
         .with_context(|| format!("unknown agent '{agent_id}'"))?;
     let load_env = playground_config.load_env;
     let playground_env = load_playground_env(playground, load_env)?;
@@ -214,6 +215,7 @@ pub fn run_default_playground_in_dir(
     let agent_command = config
         .agents
         .get(agent_id)
+        .map(|agent| agent.cmd.as_str())
         .with_context(|| format!("unknown agent '{agent_id}'"))?;
     let working_dir = prepare_in_place_directory(in_path)?;
     let mut link_session = LinkSession::default();
