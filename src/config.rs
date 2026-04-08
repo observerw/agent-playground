@@ -20,6 +20,8 @@ use anyhow::{Context, Result, bail};
 use schemars::{JsonSchema, Schema, schema_for};
 use serde::{Deserialize, Serialize};
 
+use crate::utils::symlink::copy_symlink;
+
 const APP_CONFIG_DIR: &str = "agent-playground";
 const ROOT_CONFIG_FILE_NAME: &str = "config.toml";
 const PLAYGROUND_CONFIG_FILE_NAME: &str = "apg.toml";
@@ -39,7 +41,7 @@ pub struct ConfigPaths {
     pub config_file: PathBuf,
     /// Directory containing per-playground subdirectories.
     pub playgrounds_dir: PathBuf,
-    /// Directory containing per-agent config templates copied during `init`.
+    /// Directory containing per-agent config directories copied during `init`.
     pub agents_dir: PathBuf,
 }
 
@@ -151,8 +153,8 @@ pub struct InitResult {
     pub root_config_created: bool,
     /// Whether the playground config file (`apg.toml`) was created.
     pub playground_config_created: bool,
-    /// Agent template ids that were copied into the playground directory.
-    pub initialized_agent_templates: Vec<String>,
+    /// Agent ids whose config directories were initialized in the playground.
+    pub initialized_agent_configs: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -381,6 +383,8 @@ impl RootConfigFile {
         }
         let mut agents = BTreeMap::new();
         for (agent_id, agent_config) in merged_agents {
+            validate_agent_id(&agent_id)
+                .with_context(|| format!("invalid agent id in root config: '{agent_id}'"))?;
             agents.insert(agent_id.clone(), agent_config.resolve(&agent_id)?);
         }
         let default_playground = self.default_playground;
@@ -500,7 +504,7 @@ where
         playground_id: playground_id.to_string(),
         root_config_created,
         playground_config_created: true,
-        initialized_agent_templates: selected_agent_configs
+        initialized_agent_configs: selected_agent_configs
             .iter()
             .map(|agent| agent.agent_id.clone())
             .collect(),
@@ -661,6 +665,20 @@ fn validate_playground_id(playground_id: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_agent_id(agent_id: &str) -> Result<()> {
+    if agent_id.is_empty() {
+        bail!("agent id cannot be empty");
+    }
+    if matches!(agent_id, "." | "..") || agent_id.contains('/') || agent_id.contains('\\') {
+        bail!(
+            "invalid agent id '{}': ids must not contain path separators or parent-directory segments",
+            agent_id
+        );
+    }
+
+    Ok(())
+}
+
 fn git_is_available() -> Result<bool> {
     match Command::new("git")
         .arg("--version")
@@ -715,6 +733,8 @@ fn select_agent_configs(
     let mut destination_agents: BTreeMap<PathBuf, String> = BTreeMap::new();
 
     for agent_id in agent_ids {
+        validate_agent_id(agent_id)?;
+
         if selected_agents
             .iter()
             .any(|selected_agent: &SelectedAgentConfig| &selected_agent.agent_id == agent_id)
@@ -799,6 +819,8 @@ fn copy_directory_contents_recursively(source_dir: &Path, destination_dir: &Path
             fs::create_dir_all(&destination_path)
                 .with_context(|| format!("failed to create {}", destination_path.display()))?;
             copy_directory_contents_recursively(&source_path, &destination_path)?;
+        } else if file_type.is_symlink() {
+            copy_symlink(&source_path, &destination_path)?;
         } else if file_type.is_file() {
             fs::copy(&source_path, &destination_path).with_context(|| {
                 format!(
@@ -1024,6 +1046,16 @@ mod tests {
     use std::{cell::Cell, fs, io};
     use tempfile::TempDir;
 
+    #[cfg(unix)]
+    fn create_test_symlink(source: &std::path::Path, destination: &std::path::Path) {
+        std::os::unix::fs::symlink(source, destination).expect("create symlink");
+    }
+
+    #[cfg(windows)]
+    fn create_test_symlink(source: &std::path::Path, destination: &std::path::Path) {
+        std::os::windows::fs::symlink_file(source, destination).expect("create symlink");
+    }
+
     fn resolved_agent_cmd(config: &AppConfig, agent_id: &str) -> Option<String> {
         config.agents.get(agent_id).map(|agent| agent.cmd.clone())
     }
@@ -1044,7 +1076,7 @@ mod tests {
 
         assert!(result.root_config_created);
         assert!(result.playground_config_created);
-        assert!(result.initialized_agent_templates.is_empty());
+        assert!(result.initialized_agent_configs.is_empty());
         assert!(temp_dir.path().join("config.toml").is_file());
         assert!(
             temp_dir
@@ -1573,7 +1605,7 @@ cmd = "claude"
         let playground_dir = temp_dir.path().join("playgrounds").join("demo");
 
         assert_eq!(
-            result.initialized_agent_templates,
+            result.initialized_agent_configs,
             vec!["claude".to_string(), "opencode".to_string()]
         );
         assert!(
@@ -1645,7 +1677,7 @@ cmd = "claude"
     }
 
     #[test]
-    fn init_deduplicates_selected_agent_templates() {
+    fn init_deduplicates_selected_agent_configs() {
         let temp_dir = TempDir::new().expect("temp dir");
         let paths = ConfigPaths::from_root_dir(temp_dir.path().to_path_buf());
         let selected_agents = vec![
@@ -1658,7 +1690,7 @@ cmd = "claude"
             init_playground_at(paths, "demo", &selected_agents).expect("init should succeed");
 
         assert_eq!(
-            result.initialized_agent_templates,
+            result.initialized_agent_configs,
             vec!["claude".to_string(), "opencode".to_string()]
         );
     }
@@ -1721,6 +1753,48 @@ config_dir = "../outside"
 
         assert!(error.to_string().contains("config_dir"));
         assert!(error.to_string().contains("must not contain '..'"));
+    }
+
+    #[test]
+    fn errors_when_agent_id_is_not_safe_relative_key() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        fs::write(
+            temp_dir.path().join("config.toml"),
+            r#"[agent."../escape"]
+cmd = "bad"
+"#,
+        )
+        .expect("write root config");
+
+        let error =
+            AppConfig::load_from_paths(ConfigPaths::from_root_dir(temp_dir.path().to_path_buf()))
+                .expect_err("invalid agent id should fail");
+
+        assert!(error.to_string().contains("invalid agent id"));
+    }
+
+    #[test]
+    fn init_copies_symlinks_from_agent_source_directory() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let paths = ConfigPaths::from_root_dir(temp_dir.path().to_path_buf());
+        let source_dir = paths.agents_dir.join("claude");
+        fs::create_dir_all(&source_dir).expect("create source dir");
+        fs::write(source_dir.join("settings.json"), "{}").expect("write source file");
+        create_test_symlink(
+            std::path::Path::new("settings.json"),
+            &source_dir.join("settings.link"),
+        );
+
+        init_playground_at(paths, "demo", &["claude".to_string()]).expect("init should succeed");
+
+        let destination = temp_dir
+            .path()
+            .join("playgrounds")
+            .join("demo")
+            .join(".claude")
+            .join("settings.link");
+        let metadata = fs::symlink_metadata(&destination).expect("symlink metadata");
+        assert!(metadata.file_type().is_symlink());
     }
 
     #[test]
