@@ -578,7 +578,9 @@ fn append_managed_include_block(
     let existing_content = match fs::read_to_string(destination) {
         Ok(content) => content,
         Err(error) if error.kind() == io::ErrorKind::InvalidData => return Ok(false),
-        Err(_error) => return Ok(false),
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to read {}", destination.display()));
+        }
     };
     let appended_block = managed_include_block(source, &existing_content)?;
     let mut updated_content = existing_content;
@@ -636,11 +638,11 @@ fn remove_managed_include_block(destination: &Path, appended_block: &str) -> Res
         }
     };
 
-    let Some(start) = existing_content.rfind(appended_block) else {
-        bail!("managed include block not found");
-    };
     let mut updated_content = existing_content;
-    updated_content.replace_range(start..start + appended_block.len(), "");
+    if !updated_content.ends_with(appended_block) {
+        bail!("managed include block not found at end of file");
+    }
+    updated_content.truncate(updated_content.len() - appended_block.len());
     fs::write(destination, updated_content)
         .with_context(|| format!("failed to rewrite {}", destination.display()))?;
     Ok(())
@@ -1177,10 +1179,10 @@ mod tests {
     use crate::utils::symlink::{copy_symlink, parse_directory_mount};
 
     use super::{
-        DirectoryMount, exit_code_from_status, managed_include_block,
-        materialize_playground_contents, prompt_to_save_playground_snapshot,
-        run_default_playground, run_default_playground_in_dir, run_playground,
-        save_playground_snapshot, should_prompt_to_save_playground_snapshot,
+        DirectoryMount, LinkSession, append_managed_include_block, exit_code_from_status,
+        managed_include_block, materialize_playground_contents, prompt_to_save_playground_snapshot,
+        remove_managed_include_block, run_default_playground, run_default_playground_in_dir,
+        run_playground, save_playground_snapshot, should_prompt_to_save_playground_snapshot,
         should_save_playground_snapshot,
     };
 
@@ -2137,6 +2139,51 @@ mod tests {
             "user-content"
         );
         assert!(!target_shared.join("from-playground.txt").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn append_managed_include_block_propagates_read_errors() -> Result<()> {
+        let source_dir = tempdir()?;
+        let source_agents = source_dir.path().join("AGENTS.md");
+        fs::write(&source_agents, "playground instructions\n")?;
+
+        let mut link_session = LinkSession::default();
+        let error =
+            append_managed_include_block(&source_agents, source_dir.path(), &mut link_session)
+                .expect_err("directory destination should fail to read");
+
+        assert!(error.to_string().contains("failed to read"));
+        Ok(())
+    }
+
+    #[test]
+    fn remove_managed_include_block_only_removes_trailing_block() -> Result<()> {
+        let source_dir = tempdir()?;
+        let source_agents = source_dir.path().join("AGENTS.md");
+        let destination_agents = source_dir.path().join("DESTINATION.md");
+        let original_content = "existing instructions";
+        let user_tail = "\nuser tail";
+        fs::write(&source_agents, "playground instructions\n")?;
+
+        let managed_block = managed_include_block(&source_agents, original_content)?;
+        fs::write(
+            &destination_agents,
+            format!("{original_content}{managed_block}{user_tail}"),
+        )?;
+
+        let error = remove_managed_include_block(&destination_agents, &managed_block)
+            .expect_err("non-trailing managed block should not be removed");
+
+        assert!(
+            error
+                .to_string()
+                .contains("managed include block not found at end of file")
+        );
+        assert_eq!(
+            fs::read_to_string(&destination_agents)?,
+            format!("{original_content}{managed_block}{user_tail}")
+        );
         Ok(())
     }
 
