@@ -359,15 +359,14 @@ fn remove_symlink_if_present(path: &Path) -> Result<()> {
 
     #[cfg(windows)]
     {
-        let is_dir_target = fs::metadata(path)
-            .map(|value| value.is_dir())
-            .unwrap_or(false);
-        let remove_result = if is_dir_target {
-            fs::remove_dir(path)
-        } else {
-            fs::remove_file(path)
-        };
-        remove_result.with_context(|| format!("failed to remove {}", path.display()))?;
+        match fs::remove_dir(path) {
+            Ok(()) => {}
+            Err(dir_error) => {
+                fs::remove_file(path)
+                    .map_err(|_| dir_error)
+                    .with_context(|| format!("failed to remove {}", path.display()))?;
+            }
+        }
     }
 
     Ok(())
@@ -400,7 +399,9 @@ fn remove_directory_if_empty(path: &Path) -> Result<()> {
 
 fn ensure_directory(path: &Path) -> Result<()> {
     match fs::symlink_metadata(path) {
-        Ok(metadata) => {
+        Ok(_) => {
+            let metadata = fs::metadata(path)
+                .with_context(|| format!("failed to inspect {}", path.display()))?;
             if metadata.is_dir() {
                 return Ok(());
             }
@@ -2094,6 +2095,35 @@ mod tests {
         let error = run_default_playground_in_dir(&config, None, &file_target, false, &[])
             .expect_err("non-directory in_path should fail");
         assert!(error.to_string().contains("exists but is not a directory"));
+
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn in_path_accepts_symlink_to_directory() -> Result<()> {
+        let source_dir = tempdir()?;
+        let save_root = tempdir()?;
+        let target_dir = tempdir()?;
+        let in_path_symlink = source_dir.path().join("in-path-link");
+        std::os::unix::fs::symlink(target_dir.path(), &in_path_symlink)?;
+
+        let config = make_config(
+            source_dir.path(),
+            save_root.path(),
+            "demo",
+            Some("claude"),
+            None,
+            None,
+            &[("claude", command_writing_marker("ok"))],
+        )?;
+
+        let exit_code = run_default_playground_in_dir(&config, None, &in_path_symlink, false, &[])?;
+        assert_eq!(exit_code, 0);
+        assert_eq!(
+            fs::read_to_string(target_dir.path().join("agent.txt"))?,
+            "ok"
+        );
 
         Ok(())
     }
