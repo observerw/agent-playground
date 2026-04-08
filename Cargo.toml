@@ -1,6 +1,6 @@
 [package]
 name = "agent-playground"
-version = "0.0.7"
+version = "0.1.0"
 edition = "2024"
 description = "CLI for running agent in a temporary playground."
 readme = "README.md"
