@@ -59,7 +59,8 @@ curl https://github.com/observerw/agent-playground/releases/latest/download/inst
 # when git is available, this also initializes a git repository in the new playground
 # `default` is reserved for the empty-playground subcommand and cannot be used as a playground id
 apg init demo
-# you can also initialize a playground and include specific agent config templates
+# you can also initialize a playground and include agent config directories
+# configured by [agent.<id>].config_dir and sourced from ~/.config/agent-playground/agents/<id>/
 apg init demo --agent claude --agent codex --agent opencode
 
 # list all configured playgrounds
@@ -145,6 +146,11 @@ The actual layout on disk looks like this:
 ```text
 ~/.config/agent-playground/
 ├── config.toml
+├── agents/
+│   ├── claude/
+│   │   └── ...
+│   └── opencode/
+│       └── ...
 ├── playgrounds/
 │   ├── demo/
 │   │   ├── apg.toml
@@ -169,20 +175,30 @@ saved_playgrounds_dir = "saved-playgrounds"
 default_playground = "demo"
 
 # Known agents. The key is the agent id used in `apg ... --agent <id>`,
-# and the value is the shell command used to launch it.
-[agent]
-# Built-in default entries created by `apg init`.
-claude = "claude"
-opencode = "opencode"
-# You can also define custom commands:
-# opencode = "docker run --rm -it opencode/agent:latest"
-# codex = "codex"
+# and each [agent.<id>] can configure launch command and init copy destination.
+[agent.claude]
+# Command used to launch this agent. Defaults to "claude" when omitted.
+cmd = "claude"
+# Relative directory inside a playground that receives copied files from
+# ~/.config/agent-playground/agents/claude/ when running `apg init ... --agent claude`.
+# Defaults to ".claude/" when omitted.
+# If the source directory does not exist, `apg init` still creates this target directory.
+config_dir = ".claude/"
+
+[agent.opencode]
+cmd = "opencode"
+config_dir = ".opencode/"
+
+# You can also define custom agents:
+# [agent.codex]
+# cmd = "codex --fast"
+# config_dir = ".codex/"
 
 # Default runtime options inherited by every playground unless that
 # playground overrides them in its own apg.toml.
 [playground]
 # Default agent id for playground runs.
-# This value must exist in the [agent] table.
+# This value must exist as an [agent.<id>] entry in root config.
 default_agent = "claude"
 # Whether to load the playground template's `.env` into the agent process
 # environment when running.
@@ -198,8 +214,10 @@ Default values when `config.toml` is first created:
 
 - `saved_playgrounds_dir = "saved-playgrounds"`
 - `default_playground` is unset
-- `[agent].claude = "claude"`
-- `[agent].opencode = "opencode"`
+- `[agent.claude].cmd = "claude"`
+- `[agent.claude].config_dir = ".claude/"`
+- `[agent.opencode].cmd = "opencode"`
+- `[agent.opencode].config_dir = ".opencode/"`
 - `[playground].default_agent = "claude"`
 - `[playground].load_env = false`
 - `[playground].create_mode = "copy"`
@@ -213,7 +231,7 @@ description = "TODO: describe demo"
 
 # Optional playground-specific default agent id.
 # If omitted, the value from config.toml [playground].default_agent is used.
-# This value must exist in the root config's [agent] table.
+# This value must exist as an [agent.<id>] entry in root config.
 default_agent = "codex"
 
 # Optional playground-specific override for whether to load `.env`.
