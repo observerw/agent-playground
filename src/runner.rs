@@ -578,7 +578,7 @@ fn append_managed_include_block(
     let existing_content = match fs::read_to_string(destination) {
         Ok(content) => content,
         Err(error) if error.kind() == io::ErrorKind::InvalidData => return Ok(false),
-        Err(error) => return Ok(false),
+        Err(_error) => return Ok(false),
     };
     let appended_block = managed_include_block(source, &existing_content)?;
     let mut updated_content = existing_content;
